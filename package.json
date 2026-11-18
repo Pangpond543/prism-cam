@@ -1,0 +1,11 @@
+{
+  "name": "prism-cam-workspace",
+  "private": true,
+  "description": "Dev workspace for Prism Cam — the application itself lives in app/",
+  "scripts": {
+    "build": "cargo build --release --workspace --manifest-path app/src-tauri/Cargo.toml",
+    "test:vcam": "cargo test --release -p prism-vcam --manifest-path app/src-tauri/Cargo.toml",
+    "web": "node dev-server.js",
+    "icon": "node tools/make-icon.js"
+  }
+}

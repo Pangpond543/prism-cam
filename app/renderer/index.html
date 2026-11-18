@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<title>Prism Cam</title>
+<link rel="stylesheet" href="css/fonts.css">
+<link rel="stylesheet" href="css/style.css">
+<link rel="stylesheet" href="css/cam.css">
+<link rel="stylesheet" href="css/anim.css">
+</head>
+<body>
+<canvas id="bg"></canvas>
+
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <filter id="refract" x="-5%" y="-5%" width="110%" height="110%" color-interpolation-filters="sRGB">
+      <feTurbulence type="fractalNoise" baseFrequency="0.006 0.011" numOctaves="2" seed="11" result="noise"/>
+      <feGaussianBlur in="SourceGraphic" stdDeviation="7" result="blur"/>
+      <feDisplacementMap in="blur" in2="noise" scale="70" xChannelSelector="R" yChannelSelector="G"/>
+    </filter>
+  </defs>
+</svg>
+
+<div id="app">
+  <!-- ───────────── title bar (Prism suite shell) ───────────── -->
+  <header id="titlebar" class="glass refract">
+    <div class="brand tb-drag" data-tauri-drag-region>
+      <div class="prism-logo" data-tauri-drag-region><i></i><i></i><i></i></div>
+      <span class="brand-name" data-tauri-drag-region>Prism Cam</span>
+    </div>
+    <div id="crumbs" class="crumbs"></div>
+    <div class="tb-drag tb-fill" data-tauri-drag-region></div>
+    <div class="tb-actions">
+      <button class="pill-btn" id="btn-vcam" title="ส่งภาพออกเป็นกล้องให้ Discord และโปรแกรมอื่น"><span data-icon="broadcast"></span><span id="vcam-label">เริ่มกล้องเสมือน</span></button>
+      <div class="lang-switch" id="lang-switch" title="ภาษา / Language"><i></i><button data-lang="th">TH</button><button data-lang="en">EN</button></div>
+      <button class="icon-btn" id="btn-theme" title="โหมดมืด / สว่าง"><span data-icon="moon"></span></button>
+      <button class="icon-btn" id="btn-info" title="เกี่ยวกับ Prism Cam"><span data-icon="info"></span></button>
+      <div class="win-btns">
+        <button id="win-min" title="ย่อ"><span data-icon="min"></span></button>
+        <button id="win-max" title="ขยาย"><span data-icon="max"></span></button>
+        <button id="win-close" class="danger" title="ปิด"><span data-icon="x"></span></button>
+      </div>
+    </div>
+  </header>
+
+  <!-- ───────────── dock: add sources ───────────── -->
+  <nav id="dock-wrap"><div id="dock" class="glass refract">
+    <div class="dock-grip" title="ลากเพื่อย้ายแถบนี้"></div>
+    <button class="dock-btn" data-add="camera"><span data-icon="camera"></span><em>เพิ่มกล้อง</em></button>
+    <button class="dock-btn" data-add="screen"><span data-icon="screen"></span><em>จับหน้าจอ / หน้าต่าง</em></button>
+    <button class="dock-btn" data-add="image"><span data-icon="image"></span><em>เพิ่มรูปภาพ</em></button>
+    <button class="dock-btn" data-add="video"><span data-icon="film"></span><em>เพิ่มไฟล์วิดีโอ</em></button>
+    <i class="dock-sep"></i>
+    <button class="dock-btn" data-add="text"><span data-icon="text"></span><em>เพิ่มข้อความ</em></button>
+    <button class="dock-btn" data-add="sticker"><span data-icon="sticker"></span><em>สติกเกอร์</em></button>
+    <button class="dock-btn" data-add="shape"><span data-icon="shape"></span><em>รูปทรง / พื้นหลังสี</em></button>
+    <button class="dock-btn" data-add="frame"><span data-icon="frame"></span><em>กรอบ</em></button>
+    <button class="dock-btn" data-add="area"><span data-icon="area"></span><em>พื้นที่แอนิเมชัน</em></button>
+    <i class="dock-sep"></i>
+    <button class="dock-btn" data-add="handfx"><span data-icon="hand"></span><em>เอฟเฟกต์มือ</em></button>
+  </div></nav>
+
+  <!-- ───────────── stage ───────────── -->
+  <main id="stage">
+    <div id="scene-area">
+      <div id="scene-box">
+        <canvas id="scene"></canvas>
+        <canvas id="hand-ov"></canvas>
+        <div id="hand-note" class="hidden"></div>
+        <div id="hand-coach" class="hidden"></div>
+        <button id="hand-btn" class="icon-btn hidden" title="โครงมือ (H)"><span data-icon="hand"></span></button>
+        <div id="guides"></div>
+        <div id="gizmo" class="hidden">
+          <i class="gz-rot" data-h="rot"></i>
+          <i class="gz-h" data-h="nw"></i><i class="gz-h" data-h="n"></i><i class="gz-h" data-h="ne"></i>
+          <i class="gz-h" data-h="w"></i><i class="gz-h" data-h="e"></i>
+          <i class="gz-h" data-h="sw"></i><i class="gz-h" data-h="s"></i><i class="gz-h" data-h="se"></i>
+        </div>
+        <div id="empty" class="empty-state">
+          <div class="empty-orb"><span data-icon="camera"></span></div>
+          <b>เริ่มจากเพิ่มกล้องหรือรูปภาพ</b>
+          <span>กดปุ่มที่แถบซ้าย ลากไฟล์รูปมาวาง หรือกด Ctrl+V เพื่อวางรูป</span>
+          <div class="empty-btns">
+            <button class="pill-btn primary" data-add="camera"><span data-icon="camera"></span><span>เพิ่มกล้อง</span></button>
+            <button class="pill-btn" data-add="image"><span data-icon="image"></span><span>เพิ่มรูปภาพ</span></button>
+          </div>
+        </div>
+        <div id="live-badge" class="hidden"><i></i><span>LIVE</span></div>
+      </div>
+    </div>
+  </main>
+
+  <!-- ───────────── right panel: layers + properties ───────────── -->
+  <aside id="panel-wrap"><div id="panel" class="glass">
+    <div class="insp-head" id="panel-handle">
+      <div class="tabs" id="panel-tabs">
+        <button class="tab active" data-tab="layers" title="เลเยอร์"><span data-icon="layers"></span><span>เลเยอร์</span></button>
+        <button class="tab" data-tab="props" title="ปรับแต่ง"><span data-icon="sliders"></span><span>ปรับแต่ง</span></button>
+        <button class="tab" data-tab="hand" title="มือ"><span data-icon="hand"></span><span>มือ</span></button>
+        <button class="tab" data-tab="lib" title="คลัง"><span data-icon="folder"></span><span>คลัง</span></button>
+      </div>
+    </div>
+    <div id="panel-body">
+      <div id="tab-layers" class="ptab active"></div>
+      <div id="tab-props" class="ptab"></div>
+      <div id="tab-hand" class="ptab"></div>
+      <div id="tab-lib" class="ptab"></div>
+    </div>
+  </div></aside>
+
+  <!-- ───────────── status bar ───────────── -->
+  <footer id="status-wrap"><div id="statusbar" class="glass refract">
+    <div class="st-grip" title="ลากเพื่อย้าย"></div>
+    <div id="scenes" class="scenes"></div>
+    <button class="icon-btn" id="scene-add" title="เพิ่มซีน"><span data-icon="plus"></span></button>
+    <i class="st-sep"></i>
+    <label class="field mini" title="ความละเอียดของภาพที่ส่งออก"><select id="out-res">
+      <option value="1280x720">1280 × 720</option>
+      <option value="1920x1080">1920 × 1080</option>
+      <option value="960x540">960 × 540</option>
+      <option value="720x1280">720 × 1280 (แนวตั้ง)</option>
+      <option value="1080x1080">1080 × 1080 (จัตุรัส)</option>
+    </select></label>
+    <span id="st-text">0 fps</span>
+    <i class="st-sep"></i>
+    <button class="pill-btn small" id="btn-undo" disabled title="ย้อนกลับ (Ctrl+Z)"><span data-icon="undo"></span></button>
+    <button class="pill-btn small" id="btn-snap" title="บันทึกภาพนิ่ง"><span data-icon="shutter"></span><span>ถ่ายภาพ</span></button>
+    <button class="pill-btn small" id="btn-rec" title="อัดวิดีโอ"><span data-icon="record"></span><span id="rec-label">อัดวิดีโอ</span></button>
+  </div></footer>
+</div>
+
+<div id="tooltip" class="glass tip hidden"></div>
+<div id="ctx" class="glass ctx hidden"></div>
+<div id="toasts"></div>
+<div id="modal" class="overlay hidden"></div>
+<input type="file" id="file-image" accept="image/*" multiple hidden>
+<input type="file" id="file-video" accept="video/*" hidden>
+
+<script type="module" src="js/app.js"></script>
+</body>
+</html>

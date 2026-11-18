@@ -1,0 +1,36 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "Prism Cam",
+  "version": "1.0.0",
+  "identifier": "com.prism.cam",
+  "build": {
+    "frontendDist": "../renderer"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "Prism Cam",
+        "width": 1480,
+        "height": 920,
+        "minWidth": 1040,
+        "minHeight": 680,
+        "decorations": false,
+        "shadow": true,
+        "visible": false,
+        "center": true,
+        "backgroundColor": "#e9eefc",
+        "dragDropEnabled": false,
+        "additionalBrowserArgs": "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection,MediaFoundationD3D11VideoCapture,D3D11VideoDecoder --disable-accelerated-mjpeg-decode --disable-accelerated-video-decode --disable-gpu-memory-buffer-video-frames --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows --autoplay-policy=no-user-gesture-required"
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob:; media-src 'self' blob: mediastream: http://pmedia.localhost pmedia:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; connect-src 'self' ipc: http://ipc.localhost data: blob:"
+    }
+  },
+  "bundle": {
+    "active": false,
+    "icon": ["icons/icon.ico"]
+  }
+}
