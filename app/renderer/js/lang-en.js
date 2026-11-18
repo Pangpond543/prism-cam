@@ -889,4 +889,13 @@ export const EN = {
   "1 พิกเซลของรูป = 1 พิกเซลของภาพที่ส่งออก": "1 picture pixel = 1 output pixel",
   "แก้ภาพยืด": "Fix stretch",
   "คืนสัดส่วนเดิมของรูป / วิดีโอ (ขนาดพื้นที่เท่าเดิม)": "Restore the picture / video's own proportions (same area)",
+  // status bar labels (2026-11-19)
+  "FPS กล้อง": "Camera FPS",
+  "ส่งกล้องเสมือน": "Virtual camera",
+  "เฟรมต่อวินาทีของกล้อง ภาพในโปรแกรม และวิดีโอที่อัด": "Frames per second of the camera, the picture in the app and recordings",
+  "เฟรมต่อวินาทีที่ส่งออกเป็นกล้องเสมือนให้ Discord และโปรแกรมอื่น (สูงสุด 30) — กดเพื่อดูความเร็ว": "Frames per second sent out as the virtual camera to Discord and other apps (max 30) — click for speed details",
+  "ส่งกล้องเสมือน 30 fps": "Virtual camera 30 fps",
+  "เฟรมที่ช้า": "Slow frames",
+  "ส่งไม่ทัน": "send behind",
+  "รอการ์ดจอ": "waiting for GPU",
 };

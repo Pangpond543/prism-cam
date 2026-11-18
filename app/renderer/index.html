@@ -121,11 +121,12 @@
       <option value="720x1280">720 × 1280 (แนวตั้ง)</option>
       <option value="1080x1080">1080 × 1080 (จัตุรัส)</option>
     </select></label>
-    <label class="field mini" title="เฟรมต่อวินาทีของภาพในโปรแกรมและวิดีโอที่อัด (กล้องเสมือนส่งให้ Discord ที่ 30 fps เสมอ)"><select id="out-fps">
+    <span class="st-cap" title="เฟรมต่อวินาทีของกล้อง ภาพในโปรแกรม และวิดีโอที่อัด">FPS กล้อง</span>
+    <label class="field mini" title="เฟรมต่อวินาทีของกล้อง ภาพในโปรแกรม และวิดีโอที่อัด"><select id="out-fps">
       <option value="30">30 fps</option>
       <option value="60">60 fps</option>
     </select></label>
-    <span id="st-text">0 fps</span>
+    <span id="st-text" title="เฟรมต่อวินาทีที่ส่งออกเป็นกล้องเสมือนให้ Discord และโปรแกรมอื่น (สูงสุด 30) — กดเพื่อดูความเร็ว">ส่งกล้องเสมือน 30 fps</span>
     <i class="st-sep"></i>
     <button class="pill-btn small" id="btn-undo" disabled title="ย้อนกลับ (Ctrl+Z)"><span data-icon="undo"></span></button>
     <button class="pill-btn small" id="btn-snap" title="บันทึกภาพนิ่ง"><span data-icon="shutter"></span><span>ถ่ายภาพ</span></button>

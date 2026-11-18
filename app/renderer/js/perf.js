@@ -13,7 +13,7 @@ let saved = null; try { saved = JSON.parse(localStorage.getItem(KEY) || 'null');
 
 export const perf = {
   lite: !!(saved && saved.lite), auto: saved ? saved.auto !== false : true, gpuOn: saved ? saved.gpu !== false : true,
-  level: 0, cap30: false,                     // auto-quality step (index into SCALES)
+  level: 0, cap30: false, busy: 0, stall: 0,                     // auto-quality step (index into SCALES)
   ms: { draw: 0, seg: 0, send: 0 }, // smoothed cost per frame in ms
   fps: 0, sent: 0, cpu: -1, path: '', igpu: '', firstRun: !saved,
 };
@@ -43,7 +43,8 @@ export const ema = (k, v) => { perf.ms[k] = perf.ms[k] ? perf.ms[k] * 0.9 + v * 
 // Called once per drawn frame. Judges the PC once a second:
 //   behind = fewer than 85 % of the wanted frames, the frame work eats > 80 % of the frame time, or the whole PC is > 92 % busy
 //   room   = frame work < 35 % of the frame time and the PC below 75 % — for 10 s in a row
-let winT = 0, winN = 0, sentN = 0, bad = 0, good = 0, warned = false;
+let winT = 0, winN = 0, sentN = 0, busyN = 0, stallN = 0, bad = 0, good = 0, warned = false;
+export const countBusy = () => { busyN++; };
 let calmUntil = performance.now() + 10000; // start-up (WebView, camera opening) always spikes the CPU
 export const calm = (ms = 5000) => { calmUntil = Math.max(calmUntil, performance.now() + ms); };
 export const countSent = () => { sentN++; };
@@ -52,7 +53,9 @@ export function frameDone(now, fps) {
   winN++;
   if (!winT) { winT = now; return; }
   const dt = now - winT; if (dt < 1000) return;
-  perf.fps = Math.round(winN * 1000 / dt); perf.sent = Math.round(sentN * 1000 / dt); winT = now; winN = sentN = 0;
+  perf.fps = Math.round(winN * 1000 / dt); perf.sent = Math.round(sentN * 1000 / dt);
+  perf.busy = Math.round(busyN * 1000 / dt); perf.stall = Math.round(stallN * 1000 / dt); // frames lost: send still running · read-backs that had to wait
+  winT = now; winN = sentN = busyN = stallN = 0;
   if (native) api.invoke('perf:cpu').then((c) => { if (typeof c === 'number') perf.cpu = c; }, () => {});
   bus.emit('perf:tick');
   if (!perf.auto || now < calmUntil) { bad = good = 0; return; }
@@ -140,7 +143,7 @@ function initGpu() {
   cv.addEventListener('webglcontextlost', (e) => { e.preventDefault(); G = null; });
   // two pixel-pack buffers: frame N is read back asynchronously while frame N+1 renders — a plain readPixels would
   // make the page wait for the graphics chip every frame (≈ 6–8 ms measured on an RX 6600)
-  return { cv, gl, uOut: gl.getUniformLocation(pr, 'uOut'), buf: null, pbo: [gl.createBuffer(), gl.createBuffer()], slot: 0, fence: [null, null], size: [0, 0] };
+  return { cv, gl, uOut: gl.getUniformLocation(pr, 'uOut'), buf: null, bufs: null, bk: 0, pbo: [gl.createBuffer(), gl.createBuffer()], slot: 0, fence: [null, null], size: [0, 0] };
 }
 // scene canvas → NV12 bytes at w×h (the full output size) of the PREVIOUS call's picture (one frame late),
 // [] while the first one is still on its way, or null when the GPU path is not usable
@@ -153,12 +156,14 @@ export function nv12(src, w, h) {
     if (gl.isContextLost()) { G = null; return null; }
     const tw = w / 4, th = h * 3 / 2, n = w * h * 3 / 2;
     if (cv.width !== tw || cv.height !== th) { cv.width = tw; cv.height = th; }
-    if (!G.buf || G.buf.length !== n) G.buf = new Uint8Array(n);
+    // two output buffers, used in turn: with two frames on their way, the one being sent is never overwritten
+    if (!G.bufs || G.bufs[0].length !== n) G.bufs = [new Uint8Array(n), new Uint8Array(n)];
+    G.bk ^= 1; G.buf = G.bufs[G.bk];
     // 1. collect the frame queued last time, if the graphics chip has finished it
     let out = EMPTY;
     const prev = G.slot ^ 1, f = G.fence[prev];
     if (f) {
-      const st = gl.clientWaitSync(f, 0, 0);
+      const st = perf.testStall ? gl.TIMEOUT_EXPIRED : gl.clientWaitSync(f, 0, 0); // testStall: PRISM_ACT=stalltest (acts like a busy integrated GPU)
       if (st === gl.ALREADY_SIGNALED || st === gl.CONDITION_SATISFIED) {
         gl.deleteSync(f); G.fence[prev] = null;
         if (G.size[prev] === n) {
@@ -168,7 +173,18 @@ export function nv12(src, w, h) {
           out = G.buf;
         }
       } else if (st === gl.WAIT_FAILED) throw new Error('fence wait failed');
-      else return EMPTY; // still busy: skip this frame rather than wait
+      else {
+        // the graphics chip has not finished last frame's copy yet. Skipping here (as 1.0.1 did) dropped the virtual
+        // camera to ~7 fps on a busy integrated GPU while the app itself looked smooth — so read it anyway: this waits
+        // a few ms for the chip, but every frame reaches the camera
+        gl.deleteSync(f); G.fence[prev] = null; stallN++;
+        if (G.size[prev] === n) {
+          gl.bindBuffer(gl.PIXEL_PACK_BUFFER, G.pbo[prev]);
+          gl.getBufferSubData(gl.PIXEL_PACK_BUFFER, 0, G.buf);
+          gl.bindBuffer(gl.PIXEL_PACK_BUFFER, null);
+          out = G.buf;
+        }
+      }
     }
     // 2. convert this frame and queue its read-back
     gl.viewport(0, 0, tw, th);

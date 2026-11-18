@@ -26,6 +26,8 @@ function enhance(se) {
   se._gs();
   se.addEventListener('change', se._gs);
   btn.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); if (popSel === se) close(); else open(se, btn); });
+  const fld = se.closest('.field');
+  if (fld) fld.addEventListener('click', (e) => { if (e.target !== btn && !btn.contains(e.target) && !btn.disabled) { e.preventDefault(); btn.click(); } });
   btn.addEventListener('keydown', (e) => {
     if (['ArrowDown', 'ArrowUp', 'Enter', ' '].includes(e.key) && popSel !== se) { e.preventDefault(); open(se, btn); }
   });
@@ -88,7 +90,8 @@ export function startSelects(root = document.body) {
       if (popSel && !popSel.isConnected) close(); // the panel was rebuilt under an open list
     }
   }).observe(root, { childList: true, subtree: true });
-  addEventListener('pointerdown', (e) => { if (pop && !e.target.closest('.gs-btn')) close(); }, true);
+  // a press on the list itself must NOT close it here — the click that follows is what picks the option
+  addEventListener('pointerdown', (e) => { if (pop && !e.target.closest('.gs-btn, .gs-pop')) close(); }, true);
   addEventListener('resize', close);
   addEventListener('wheel', (e) => { if (pop && !pop.contains(e.target)) close(); }, { passive: true, capture: true });
   addEventListener('keydown', (e) => {

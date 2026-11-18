@@ -7,7 +7,7 @@ import { startStudio, studio } from './studio.js';
 import { startHandUi } from './handui.js';
 import { setArmed } from './handctl.js';
 import { startAnim } from './anim.js';
-import { perf, nv12, ema, countSent, setLite, setGpu, detectIgpu, calm } from './perf.js';
+import { perf, nv12, ema, countSent, countBusy, setLite, setGpu, detectIgpu, calm } from './perf.js';
 import { startPerfUi, perfReport } from './perfui.js';
 import { startSelects } from './select.js';
 
@@ -74,7 +74,7 @@ async function showInfo() {
 async function beforeUpdate() { await studio.save(); studio.releaseAll(); if (vcam.on) await stopVcam(); }
 
 /* ---------------------------------------------------------- virtual camera */
-const vcam = { on: false, busy: false, last: 0, buf: null, useVF: typeof VideoFrame === 'function', fails: 0 };
+const vcam = { on: false, inflight: 0, last: 0, bk: 0, bufs: null, buf: null, useVF: typeof VideoFrame === 'function', fails: 0 };
 function setVcam(on) {
   vcam.on = on; vcam.fails = 0;
   $('btn-vcam').classList.toggle('on', on);
@@ -110,7 +110,8 @@ async function toggleVcam() {
 }
 async function grab(c) {
   const w = c.width, h = c.height;
-  if (!vcam.buf || vcam.buf.length !== w * h * 4) vcam.buf = new Uint8Array(w * h * 4);
+  if (!vcam.bufs || vcam.bufs[0].length !== w * h * 4) vcam.bufs = [new Uint8Array(w * h * 4), new Uint8Array(w * h * 4)];
+  vcam.bk ^= 1; vcam.buf = vcam.bufs[vcam.bk]; // in turn, like the GPU path: two frames may be on their way
   if (vcam.useVF) {
     try {
       const vf = new VideoFrame(c, { timestamp: Math.round(performance.now() * 1000) });
@@ -121,18 +122,20 @@ async function grab(c) {
   return new Uint8Array(c.getContext('2d').getImageData(0, 0, w, h).data.buffer);
 }
 bus.on('frame', (c) => {
-  if (!vcam.on || vcam.busy) return;
+  if (!vcam.on) return;
   const o = studio.out(), t0 = performance.now();
   if (t0 - vcam.last < 1000 / 30 - 6) return; // the virtual camera runs at 30 fps (Discord's limit): a 60 fps project sends every other frame
-  vcam.busy = true; vcam.last = t0;
+  // up to two frames on their way at once: a slow hand-over to the app (busy PC) no longer halves the frame rate
+  if (vcam.inflight >= 2) { countBusy(); return; }
+  vcam.inflight++; vcam.last = t0;
   // fast path: the graphics chip converts (and scales the light-mode picture back to full size); else RGBA + Rust converts
   const nv = nv12(c, o.w, o.h);
-  if (nv && !nv.length) { ema('send', performance.now() - t0); vcam.busy = false; return; } // first frame still on the graphics chip
+  if (nv && !nv.length) { ema('send', performance.now() - t0); vcam.inflight--; return; } // the very first frame is still on the graphics chip
   const sent = nv ? api.raw('vcam_frame', nv, { 'x-w': String(o.w), 'x-h': String(o.h), 'x-fmt': 'nv12' })
     : grab(c).then((buf) => { perf.path = 'cpu'; return api.raw('vcam_frame', buf, { 'x-w': String(c.width), 'x-h': String(c.height) }); });
   ema('send', performance.now() - t0);
   sent.then(() => { vcam.fails = 0; countSent(); }, () => { if (++vcam.fails > 90) { setVcam(false); toast(T`กล้องเสมือนหยุดทำงาน`, { kind: 'err' }); } })
-    .finally(() => { vcam.busy = false; });
+    .finally(() => { vcam.inflight--; });
 });
 bus.on('out', async () => { if (vcam.on) { await stopVcam(); toggleVcam(); } });
 
@@ -251,6 +254,15 @@ async function boot() {
     else if (act.startsWith('click:')) { const el = document.querySelector(act.slice(6)); if (el) el.click(); api.invoke('app:log', 'click ' + act.slice(6) + ' ' + !!el); await wait(700); }
     else if (act === 'logsel') { const L = studio.selected(); api.invoke('app:log', 'sel: ' + (L ? `${L.type} w=${Math.round(L.w)} h=${Math.round(L.h)} x=${Math.round(L.x)}` : 'none')); }
     else if (act.startsWith('key:')) { const k = act.slice(4).split('+'); dispatchEvent(new KeyboardEvent('keydown', { key: k.pop(), ctrlKey: k.includes('ctrl'), shiftKey: k.includes('shift'), bubbles: true })); await wait(400); }
+    else if (act === 'stalltest') perf.testStall = true;
+    else if (act === 'min') { await api.invoke('win:min'); await wait(500); }
+    else if (act.startsWith('sentlog:')) { for (let i = 0; i < +act.slice(8); i++) { await wait(1000); api.invoke('app:log', `sentlog: drawn=${perf.fps} sent=${perf.sent} busy=${perf.busy} stall=${perf.stall} send=${perf.ms.send.toFixed(1)}ms path=${perf.path} hidden=${document.hidden} vis=${document.visibilityState}`); } }
+    else if (act.startsWith('press:')) { // pointerdown → pointerup → click, like a real mouse (the plain click: hook skips the press)
+      const el = document.querySelector(act.slice(6)); const r = el && el.getBoundingClientRect(), o = r ? { bubbles: true, cancelable: true, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, button: 0, pointerId: 1, pointerType: 'mouse', isPrimary: true } : null;
+      if (el) { el.dispatchEvent(new PointerEvent('pointerdown', o)); el.dispatchEvent(new MouseEvent('mousedown', o)); el.dispatchEvent(new PointerEvent('pointerup', o)); el.dispatchEvent(new MouseEvent('mouseup', o)); el.dispatchEvent(new MouseEvent('click', o)); }
+      api.invoke('app:log', 'press ' + act.slice(6) + ' ' + !!el); await wait(500); }
+    else if (act === 'bgdraws') api.invoke('app:log', `bgdraws: ${window.__bgDraws || 0} lite=${perf.lite}`);
+    else if (act === 'logfps') api.invoke('app:log', `fps: select=${$('out-fps').value} project=${studio.out().fps} text="${$('st-text').textContent}"`);
     else if (act.startsWith('wait:')) await wait(+act.slice(5) * 1000);
     else if (act === 'fps60' || act === 'fps30') { const sel = $('out-fps'); sel.value = act.slice(3); sel.dispatchEvent(new Event('change')); await wait(2500); }
     else if (act.startsWith('mime:')) window.__recMime = act.slice(5).replace(/\+/g, ',');

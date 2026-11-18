@@ -12,7 +12,8 @@ function rows() {
   const o = studio.out(), s = renderScale(), ow = Math.round(o.w * s), oh = Math.round(o.h * s);
   return [
     [T`ภาพที่วาดได้`, `${perf.fps} / ${liveFps(o.fps)} fps` + (liveFps(o.fps) < o.fps ? ` (${T`ลดจาก`} ${o.fps})` : ''), perf.fps && perf.fps < liveFps(o.fps) * 0.85 ? 'bad' : liveFps(o.fps) < o.fps ? 'warn' : ''],
-    [T`ส่งให้กล้องเสมือน`, perf.sent ? `${perf.sent} fps` : T`ยังไม่ได้เปิด`, ''],
+    [T`ส่งให้กล้องเสมือน`, perf.sent ? `${perf.sent} fps` : T`ยังไม่ได้เปิด`, perf.sent && perf.sent < 24 ? 'bad' : ''],
+    perf.sent && (perf.busy || perf.stall) ? [T`เฟรมที่ช้า`, `${T`ส่งไม่ทัน`} ${perf.busy} · ${T`รอการ์ดจอ`} ${perf.stall} /s`, perf.busy > 5 ? 'bad' : 'warn'] : null,
     [T`ความละเอียดที่วาด`, `${ow} × ${oh}` + (s < 1 ? ` (${Math.round(s * 100)}%)` : ''), s < 1 ? 'warn' : ''],
     [T`CPU ทั้งเครื่อง`, perf.cpu >= 0 ? `${perf.cpu}%` : '—', perf.cpu > 85 ? 'bad' : perf.cpu > 65 ? 'warn' : ''],
     [T`วาดภาพ`, ms(perf.ms.draw), perf.ms.draw > 1000 / o.fps * 0.7 ? 'bad' : ''],
@@ -20,7 +21,7 @@ function rows() {
     [T`จับมือ`, hands.state === 'ready' ? ms(hands.ms) : T`ไม่ได้ใช้`, ''],
     [T`แปลงภาพส่ง Discord`, perf.sent ? `${ms(perf.ms.send)} · ${perf.path === 'gpu' ? T`การ์ดจอ` : 'CPU'}` : '—', ''],
     [T`การ์ดจอ`, perf.igpu || '—', ''],
-  ];
+  ].filter(Boolean);
 }
 export const perfReport = () => `Prism Cam ${T`ความเร็ว`}\n` + rows().map(([k, v]) => `${k}: ${v}`).join('\n') + `\n${T`โหมดเครื่องเบา`}: ${perf.lite ? 'on' : 'off'} · ${T`ปรับคุณภาพอัตโนมัติ`}: ${perf.auto ? 'on' : 'off'}`;
 
@@ -54,7 +55,7 @@ function open() {
 }
 export function startPerfUi() {
   const st = $('st-text');
-  st.classList.add('clickable'); st.title = T`กดเพื่อดูความเร็วและเปิดโหมดเครื่องเบา`;
+  st.classList.add('clickable');
   st.onclick = open;
   bus.on('perf:tick', fill);
   bus.on('perf', () => { if (pop) pop.querySelector('[data-k="lite"]').checked = perf.lite; fill(); });

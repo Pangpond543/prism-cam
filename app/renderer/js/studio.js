@@ -1032,7 +1032,7 @@ function draw() {
   alphaK = 1; linkKids(root()); syncAreas(); drawList(root(), now);
   try { drawOverlay(); } catch (err) { console.error('overlay', err); }
   fpsN++;
-  if (now - fpsT >= 1000) { $('st-text').textContent = `${Math.round(fpsN * 1000 / (now - fpsT))} fps`; fpsN = 0; fpsT = now; }
+  if (now - fpsT >= 1000) { $('st-text').textContent = `${T`ส่งกล้องเสมือน`} ${perf.sent || 30} fps`; fpsN = 0; fpsT = now; }
   placeGizmo();
   ema('draw', performance.now() - t0);
   if (recTrack) recTrack.requestFrame();

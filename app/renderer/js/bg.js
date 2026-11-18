@@ -64,7 +64,7 @@ const VERT = 'attribute vec2 p; void main(){ gl_Position = vec4(p, 0.0, 1.0); }'
 export function startBackground(canvas) {
   // The background must never take the GPU down: low resolution, ~24 fps, and it rebuilds itself if the driver resets the context.
   let gl = null, prog, uRes, uTime, uMouse, uDark, dead = false;
-  let dark = 0, mx = 0, my = 0, tx = 0, ty = 0, last = 0;
+  let dark = 0, mx = 0, my = 0, tx = 0, ty = 0, last = 0, wasLite = false, needDraw = true;
   const SCALE = 0.4;
   const fallback = () => { canvas.style.background = 'linear-gradient(135deg,#dbe6ff,#f1dcff 45%,#ffe3ec 75%,#e0fbf2)'; };
   const init = () => {
@@ -86,28 +86,34 @@ export function startBackground(canvas) {
     canvas.width = Math.max(2, Math.floor(innerWidth * SCALE));
     canvas.height = Math.max(2, Math.floor(innerHeight * SCALE));
     if (gl && !gl.isContextLost()) gl.viewport(0, 0, canvas.width, canvas.height);
+    needDraw = true;
   };
   canvas.addEventListener('webglcontextlost', (e) => { e.preventDefault(); gl = null; });
-  canvas.addEventListener('webglcontextrestored', () => { if (!dead) init(); });
+  canvas.addEventListener('webglcontextrestored', () => { if (!dead) { init(); needDraw = true; } });
   addEventListener('resize', resize);
   addEventListener('pointermove', (e) => { tx = e.clientX * SCALE; ty = (innerHeight - e.clientY) * SCALE; });
   init();
   tx = mx = canvas.width / 2; ty = my = canvas.height / 2;
-  const t0 = performance.now();
+  const t0 = performance.now(); let tNow = 0;
   const frame = (now) => {
     requestAnimationFrame(frame);
     if (dead || document.hidden || !gl || gl.isContextLost() || now - last < 42) return;
-    // light mode: the background stands still (one frame, plus the cross-fade when the theme changes)
-    const want = document.documentElement.dataset.theme === 'dark' ? 1 : 0;
-    if (document.documentElement.classList.contains('lite') && last && Math.abs(want - dark) < 0.01 && now - last < 2000) return;
+    // light mode: the background STOPS — no animation, no pointer light, no GPU work at all. It draws again only for the
+    // frame that freezes it, after a resize, and while the colours cross-fade when the theme changes.
+    const want = document.documentElement.dataset.theme === 'dark' ? 1 : 0, lite = document.documentElement.classList.contains('lite');
+    if (lite !== wasLite) { wasLite = lite; needDraw = true; }
+    if (lite && !needDraw && Math.abs(want - dark) < 0.01) return;
+    needDraw = false;
     last = now;
     mx += (tx - mx) * 0.09; my += (ty - my) * 0.09; // light trails the pointer with inertia
     gl.uniform2f(uRes, canvas.width, canvas.height);
-    gl.uniform1f(uTime, (now - t0) / 1000);
+    if (!lite) tNow = (now - t0) / 1000; // light mode keeps the last time → the frozen picture does not jump when redrawn
+    gl.uniform1f(uTime, tNow);
     gl.uniform2f(uMouse, mx, my);
     dark += ((document.documentElement.dataset.theme === 'dark' ? 1 : 0) - dark) * 0.12; // cross-fade between themes
     gl.uniform1f(uDark, dark);
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+    window.__bgDraws = (window.__bgDraws || 0) + 1;
   };
   requestAnimationFrame(frame);
 }
