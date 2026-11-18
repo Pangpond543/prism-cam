@@ -307,3 +307,74 @@ html[data-theme=dark] .lib-t .lib-x { background: rgba(30, 34, 66, .9); }
 /* four panel tabs: only the open one shows its name */
 #panel-tabs .tab { white-space: nowrap; }
 #panel-tabs .tab:not(.active) > span:not([data-icon]) { display: none; }
+
+/* ─────────── speed panel (click the fps number) ─────────── */
+#st-text.clickable { cursor: pointer; border-radius: 999px; transition: background .2s; }
+#st-text.clickable:hover { background: rgba(255, 255, 255, .45); }
+html.lite #st-text::after { content: " · LITE"; font-size: 10.5px; letter-spacing: .04em; color: var(--accent); }
+.perf-pop { position: fixed; z-index: 60; width: 340px; padding: 14px 14px 12px; border-radius: 22px; }
+.perf-pop.glass { background: linear-gradient(135deg, rgba(250, 251, 255, .92), rgba(240, 243, 255, .86)); } /* opens over the live picture: keep the numbers readable */
+html[data-theme=dark] .perf-pop.glass { background: linear-gradient(135deg, rgba(36, 42, 82, .93), rgba(24, 28, 60, .9)); }
+.perf-pop h4 { display: flex; align-items: center; gap: 7px; font-family: var(--font-head); font-size: 13.5px; font-weight: 650; margin-bottom: 8px; }
+.perf-pop h4 svg { width: 16px; height: 16px; }
+.perf-pop h4 .icon-btn { margin-left: auto; }
+.pf-opt { display: flex; gap: 10px; align-items: flex-start; padding: 7px 4px; cursor: pointer; }
+.pf-opt input { margin-top: 2px; }
+.pf-opt b { display: block; font-size: 12.5px; font-weight: 600; }
+.pf-opt small { display: block; font-size: 11.5px; color: var(--ink-3); line-height: 1.45; white-space: normal; }
+.pf-rows { margin-top: 6px; padding: 8px 10px; border-radius: 14px; background: rgba(255, 255, 255, .34); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .6); }
+.pf-row { display: flex; justify-content: space-between; gap: 10px; font-size: 12px; padding: 2.5px 0; color: var(--ink-2); }
+.pf-row b { font-weight: 600; color: var(--ink); font-variant-numeric: tabular-nums; text-align: right; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 190px; }
+.pf-row.warn b { color: #c98a12; }
+.pf-row.bad b { color: #e0445e; }
+.perf-pop .modal-btns { margin-top: 10px; }
+html[data-theme=dark] .pf-rows { background: rgba(255, 255, 255, .06); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .12); }
+html[data-theme=dark] .pf-row.warn b { color: #ffc864; }
+html[data-theme=dark] .pf-row.bad b { color: #ff7b93; }
+
+/* ─────────── light mode: no live backdrop blur (the iGPU re-blurs every glass pane every frame) ─────────── */
+html.lite .glass, html.lite .glass.refract, html.lite[data-theme=dark] .glass, html.lite[data-theme=dark] .glass.refract,
+html.lite #modal, html.lite #scanning, html.lite .dock-btn em { -webkit-backdrop-filter: none !important; backdrop-filter: none !important; }
+html.lite .glass { background: linear-gradient(135deg, rgba(246, 248, 255, .93), rgba(236, 240, 255, .88)); }
+html.lite[data-theme=dark] .glass { background: linear-gradient(135deg, rgba(34, 40, 78, .94), rgba(24, 28, 58, .92)); }
+
+/* Elements that lift on hover keep their hover zone: without this strip the lifted box slides off a pointer resting on its
+   bottom edge, drops back under it, lifts again … (the "flickering library tile" bug). */
+.lib-t::after, .pick::after, .eg-b::after, .at-clip::after, .qe::after, .at-tog::after { content: ""; position: absolute; left: 0; right: 0; bottom: -4px; height: 4px; }
+.pick, .eg-b, .at-clip, .qe, .at-tog { position: relative; }
+
+/* gizmo handles: 13 px to look at, 28 px to hit */
+.gz-h::before, .gz-rot::before { content: ""; position: absolute; inset: -8px; border-radius: 50%; }
+
+/* icon-only chips (corner placement, zoom) */
+.chip.ico-only { display: inline-grid; place-items: center; padding: 6px 0; }
+.chip.ico-only svg { width: 18px; height: 18px; }
+.chip svg { width: 15px; height: 15px; flex: none; }
+.size-row { display: flex; gap: 6px; flex-wrap: wrap; margin: 4px 0 6px; }
+.size-row .chip.ico-only { width: 38px; }
+
+/* ─────────── glass dropdown (select.js) ─────────── */
+select.gs-native { position: absolute !important; width: 1px !important; height: 1px !important; opacity: 0 !important; pointer-events: none !important; overflow: hidden; }
+.field:has(> .gs-btn) { position: relative; padding-right: 8px; }
+.gs-btn { display: flex; align-items: center; gap: 6px; width: 100%; min-width: 0; padding: 0; border: 0; background: none; font: inherit; color: inherit; font-weight: 600; cursor: pointer; text-align: left; }
+.gs-txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.gs-car { flex: none; display: grid; place-items: center; width: 20px; height: 20px; border-radius: 50%; background: var(--grad); color: #fff; box-shadow: 0 3px 8px -2px rgba(124, 120, 255, .65); transition: transform .35s var(--spring); }
+.gs-car svg { width: 13px; height: 13px; stroke-width: 2.6; }
+.gs-btn:hover .gs-car { transform: scale(1.12); }
+.gs-btn.open .gs-car { transform: rotate(180deg); }
+.gs-btn:disabled { opacity: .5; cursor: default; }
+.field:has(> .gs-btn.open) { background: rgba(255, 255, 255, .9); box-shadow: inset 0 0 0 1.5px rgba(124, 140, 255, .7), 0 8px 24px -10px rgba(124, 140, 255, .6); }
+.gs-pop { position: fixed; z-index: 200; padding: 6px; border-radius: 16px; overflow-y: auto; display: flex; flex-direction: column; gap: 2px;
+  background: linear-gradient(135deg, rgba(252, 253, 255, .95), rgba(242, 245, 255, .9)) !important; animation: gs-in .22s var(--spring); transform-origin: top center; }
+.gs-pop.up { transform-origin: bottom center; }
+@keyframes gs-in { from { opacity: 0; transform: translateY(-4px) scale(.97); } }
+.gs-opt { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 7px 10px 7px 12px; border: 0; border-radius: 10px; background: none; font: inherit; font-size: 12.5px; color: var(--ink-2); text-align: left; cursor: pointer; white-space: nowrap; transition: background .15s, color .15s; }
+.gs-opt.hot, .gs-opt:hover { background: rgba(124, 140, 255, .14); color: var(--ink); }
+.gs-opt.on { color: var(--ink); font-weight: 650; background: linear-gradient(90deg, rgba(124, 140, 255, .22), rgba(255, 140, 200, .16)); }
+.gs-opt svg { width: 15px; height: 15px; color: var(--accent); stroke-width: 2.4; flex: none; }
+.gs-opt:disabled { opacity: .4; cursor: default; }
+.gs-grp { padding: 8px 12px 3px; font-size: 10.5px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; color: var(--ink-3); }
+html[data-theme=dark] .gs-pop { background: linear-gradient(135deg, rgba(38, 44, 86, .96), rgba(26, 30, 64, .94)) !important; }
+html[data-theme=dark] .field:has(> .gs-btn.open) { background: rgba(255, 255, 255, .14); }
+html[data-theme=dark] .gs-opt.hot, html[data-theme=dark] .gs-opt:hover { background: rgba(160, 170, 255, .16); }
+html[data-theme=dark] .gs-opt.on { background: linear-gradient(90deg, rgba(124, 140, 255, .32), rgba(255, 140, 200, .2)); }

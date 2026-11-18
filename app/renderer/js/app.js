@@ -7,6 +7,9 @@ import { startStudio, studio } from './studio.js';
 import { startHandUi } from './handui.js';
 import { setArmed } from './handctl.js';
 import { startAnim } from './anim.js';
+import { perf, nv12, ema, countSent, setLite, setGpu, detectIgpu, calm } from './perf.js';
+import { startPerfUi, perfReport } from './perfui.js';
+import { startSelects } from './select.js';
 
 /* ------------------------------------------------------------ about/update */
 const AUTHOR = 'Thanakorn Damrikitjaroen', MODEL = 'Claude Fable 5.2';
@@ -71,7 +74,7 @@ async function showInfo() {
 async function beforeUpdate() { await studio.save(); studio.releaseAll(); if (vcam.on) await stopVcam(); }
 
 /* ---------------------------------------------------------- virtual camera */
-const vcam = { on: false, busy: false, buf: null, useVF: typeof VideoFrame === 'function', fails: 0 };
+const vcam = { on: false, busy: false, last: 0, buf: null, useVF: typeof VideoFrame === 'function', fails: 0 };
 function setVcam(on) {
   vcam.on = on; vcam.fails = 0;
   $('btn-vcam').classList.toggle('on', on);
@@ -102,7 +105,7 @@ async function toggleVcam() {
     r = await api.invoke('vcam:start', { w: o.w, h: o.h, fps: o.fps });
   }
   if (!r.ok) { toast(vcamWhy(r), { kind: 'err' }); return; }
-  setVcam(true);
+  setVcam(true); calm();
   toast(T`กล้องเสมือนทำงานแล้ว — เลือกกล้อง “Prism Cam” ใน Discord ได้เลย`);
 }
 async function grab(c) {
@@ -119,9 +122,16 @@ async function grab(c) {
 }
 bus.on('frame', (c) => {
   if (!vcam.on || vcam.busy) return;
-  vcam.busy = true;
-  grab(c).then((buf) => api.raw('vcam_frame', buf, { 'x-w': String(c.width), 'x-h': String(c.height) }))
-    .then(() => { vcam.fails = 0; }, () => { if (++vcam.fails > 90) { setVcam(false); toast(T`กล้องเสมือนหยุดทำงาน`, { kind: 'err' }); } })
+  const o = studio.out(), t0 = performance.now();
+  if (t0 - vcam.last < 1000 / 30 - 6) return; // the virtual camera runs at 30 fps (Discord's limit): a 60 fps project sends every other frame
+  vcam.busy = true; vcam.last = t0;
+  // fast path: the graphics chip converts (and scales the light-mode picture back to full size); else RGBA + Rust converts
+  const nv = nv12(c, o.w, o.h);
+  if (nv && !nv.length) { ema('send', performance.now() - t0); vcam.busy = false; return; } // first frame still on the graphics chip
+  const sent = nv ? api.raw('vcam_frame', nv, { 'x-w': String(o.w), 'x-h': String(o.h), 'x-fmt': 'nv12' })
+    : grab(c).then((buf) => { perf.path = 'cpu'; return api.raw('vcam_frame', buf, { 'x-w': String(c.width), 'x-h': String(c.height) }); });
+  ema('send', performance.now() - t0);
+  sent.then(() => { vcam.fails = 0; countSent(); }, () => { if (++vcam.fails > 90) { setVcam(false); toast(T`กล้องเสมือนหยุดทำงาน`, { kind: 'err' }); } })
     .finally(() => { vcam.busy = false; });
 });
 bus.on('out', async () => { if (vcam.on) { await stopVcam(); toggleVcam(); } });
@@ -129,6 +139,7 @@ bus.on('out', async () => { if (vcam.on) { await stopVcam(); toggleVcam(); } });
 /* -------------------------------------------------------------------- boot */
 async function boot() {
   translateDom(document.body);
+  startSelects();
   hydrateIcons();
   setTheme(savedTheme());
   startBackground($('bg'));
@@ -168,8 +179,13 @@ async function boot() {
   await startStudio();
   startHandUi();
   startAnim();
+  startPerfUi();
   bus.on('cmd', (c) => { if (c === 'vcam') toggleVcam(); });
   api.invoke('app:ready');
+  // first start on a PC with integrated graphics → light mode on (the user can turn it off in the speed panel)
+  const igpu = detectIgpu();
+  api.invoke('app:log', `perf: gpu="${perf.igpu}" integrated=${igpu} lite=${perf.lite} first=${perf.firstRun}`).catch(() => {});
+  if (perf.firstRun && igpu) { setLite(true, true); toast(T`เครื่องนี้ใช้การ์ดจอออนบอร์ด — เปิดโหมดเครื่องเบาให้แล้ว (กดตัวเลข fps ด้านล่างเพื่อปรับ)`); }
   // self-test hook (same idea as Prism Size): PRISM_ACT=shape,text,dark,info … drives the UI on start
   const acts = String((await api.invoke('about:info')).test || '').split(',').filter(Boolean);
   const wait = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -231,6 +247,17 @@ async function boot() {
       const i = sc.indexOf(studio.scene()); if (i > 0 && studio.scene().layers.some((l) => l.type === 'area')) { sc.splice(i, 1); document.querySelector('#scenes .chip:nth-child(' + (back + 1) + ')')?.click(); }
       studio.refreshAll(); studio.commit(); await studio.save(); say('cleaned scenes=' + sc.length);
     }
+    else if (act === 'lite' || act === 'nolite') setLite(act === 'lite', true);
+    else if (act.startsWith('click:')) { const el = document.querySelector(act.slice(6)); if (el) el.click(); api.invoke('app:log', 'click ' + act.slice(6) + ' ' + !!el); await wait(700); }
+    else if (act === 'logsel') { const L = studio.selected(); api.invoke('app:log', 'sel: ' + (L ? `${L.type} w=${Math.round(L.w)} h=${Math.round(L.h)} x=${Math.round(L.x)}` : 'none')); }
+    else if (act.startsWith('key:')) { const k = act.slice(4).split('+'); dispatchEvent(new KeyboardEvent('keydown', { key: k.pop(), ctrlKey: k.includes('ctrl'), shiftKey: k.includes('shift'), bubbles: true })); await wait(400); }
+    else if (act.startsWith('wait:')) await wait(+act.slice(5) * 1000);
+    else if (act === 'fps60' || act === 'fps30') { const sel = $('out-fps'); sel.value = act.slice(3); sel.dispatchEvent(new Event('change')); await wait(2500); }
+    else if (act.startsWith('mime:')) window.__recMime = act.slice(5).replace(/\+/g, ',');
+    else if (act === 'codecs') api.invoke('app:log', 'codecs: ' + ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm;codecs=h264', 'video/webm;codecs=av1', 'video/mp4;codecs=avc1', 'video/mp4'].map((m) => m + '=' + MediaRecorder.isTypeSupported(m)).join(' '));
+    else if (act.startsWith('rec:')) { bus.emit('cmd', 'rec'); await wait(+act.slice(4) * 1000); bus.emit('cmd', 'rec'); await wait(1500); }
+    else if (act === 'gpu' || act === 'nogpu') { if (perf.gpuOn !== (act === 'gpu')) { setGpu(act === 'gpu', true); location.reload(); return; } }
+    else if (act === 'perf') { $('st-text').click(); await wait(8000); api.invoke('app:log', 'perf: ' + perfReport().replace(/\n/g, ' | ')); }
     else if (act === 'props') bus.emit('select-tab', 'props');
     else if (act.startsWith('tab:')) studio.showTab(act.slice(4));
     else if (act === 'unguard') { try { localStorage.removeItem('prismCamOpening'); } catch { /* */ } api.invoke('app:log', 'unguard: camera guard cleared'); }

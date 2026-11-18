@@ -2,12 +2,16 @@
 import { api, native, bus, T, toast, htmlBox, promptBox, ctxMenu, esc, clamp, $, remember, recall } from './core.js';
 import { icon } from './icons.js';
 import { createProc, loadSegmenter, segment, segState } from './fx.js';
+import { perf, renderScale, liveFps, resetCap, segEvery, ema, frameDone } from './perf.js';
 import { hands, feedHands, poseHands, stopHands, pruneHands, setHandOptions, BONES, gestureList, gestureName, pairList } from './hands.js';
 import { customList, modelReady } from './handml.js';
 import { drawHandFx, dropHandFx, clearHandDrawing, FX_DEFAULT } from './handfx.js';
 import { frame as animFrame, AV, kxOf, kyOf, uid as auid, PROPS as APROPS, fixClip, evalTrack } from './anim-core.js';
 
-const canvas = $('scene'), ctx = canvas.getContext('2d', { willReadFrequently: true }); // CPU canvas: the virtual camera reads every frame back, and doing that from a GPU canvas made AMD drivers time out
+// GPU canvas when the graphics chip converts the camera picture (perf.js nv12: no per-frame CPU read-back at all);
+// CPU canvas otherwise (the RGBA path reads every frame back). The old note "a GPU canvas made AMD drivers time out"
+// dates from the wrong-exe hunt (pitfalls) and was never confirmed. Switching takes effect on the next start.
+const canvas = $('scene'), ctx = canvas.getContext('2d', { willReadFrequently: !perf.gpuOn, alpha: false });
 const box = $('scene-box'), gizmo = $('gizmo'), guides = $('guides');
 const uid = () => Math.random().toString(36).slice(2, 9);
 const MEDIA = new Set(['camera', 'screen', 'image', 'video']);
@@ -61,7 +65,7 @@ export const hooks = { begin: null, end: null, rest: null }; // rest(L) = a laye
 const rt = new Map();        // layer id → { el, ready, proc, mask, pending, url }
 const cams = new Map();      // deviceId → { stream, video, promise }
 
-/* history — three zones, each with its own undo / redo. Ctrl+Z works on the zone under the mouse:
+/* history — three zones (each keeps its own stack, one Ctrl+Z undoes the newest change of any of them):
    studio = stage, layers and their properties · anim = animation clips · hand = hand-gesture settings.
    (Assets are kept out of the snapshots — they never change.) */
 const ZONES = ['studio', 'anim', 'hand'];
@@ -111,20 +115,20 @@ function step(zs, back) {
   queueSave(); undoBtn();
   toast((back ? T`ย้อนกลับ` : T`ทำซ้ำ`) + ' · ' + done.map((z) => ZNAME()[z]).join(' + '));
 }
-// which zone the mouse is over
+// element under the mouse (overStage: Ctrl+C / V on the stage)
 let hoverEl = null;
 addEventListener('pointermove', (e) => { hoverEl = e.target; }, { capture: true, passive: true });
-function zonesAt() {
-  const el = hoverEl && hoverEl.closest && hoverEl.isConnected ? hoverEl : null;
-  if (!el) return ZONES;
-  if (el.closest('#tab-hand')) return ['hand'];
-  if (el.closest('#anim-top, #anim-tl, #anim-side-wrap')) return ['anim', 'hand'];
-  if (el.closest('#scene-area')) return document.body.classList.contains('anim-mode') ? ['anim', 'studio'] : ['studio'];
-  if (el.closest('#panel-wrap, #dock-wrap')) return ['studio'];
-  return ZONES;
-}
-export function undo() { step(zonesAt(), true); }
-export function redo() { step(zonesAt(), false); }
+// Ctrl+Z undoes the newest change wherever it was made (stage, layers, animation, hand settings) — picking the zone
+// under the mouse made Ctrl+Z "not stick" whenever the pointer rested over a different panel than the last edit.
+// The toast says which part was undone.
+export function undo() { step(ZONES, true); }
+export function redo() { step(ZONES, false); }
+// clicking anything else ends typing in a text box: otherwise Ctrl+Z kept going to that box's own undo
+// (the stage and the timeline take the pointer without moving the focus)
+addEventListener('pointerdown', (e) => {
+  const a = document.activeElement;
+  if (a && a !== document.body && a.matches && a.matches('input, textarea, [contenteditable]') && !a.contains(e.target) && !(e.target.closest && e.target.closest('label') === a.closest('label') && a.closest('label'))) a.blur();
+}, true);
 addEventListener('focusin', (e) => { if (e.target) e.target._typed = false; }, true);
 addEventListener('input', (e) => { if (e.target && !e.target._scrub) e.target._typed = true; }, true);
 // Ctrl+Z / Ctrl+Y / Ctrl+Shift+Z everywhere (text boxes keep their own typing undo)
@@ -351,7 +355,7 @@ function camera(deviceId, force, label) {
     new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 10000)),
   ]);
   guard(true);
-  const want = (id) => ({ deviceId: id ? { exact: id } : undefined, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30, max: 30 } });
+  const want = (id) => ({ deviceId: id ? { exact: id } : undefined, width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: camRate() });
   // WebView2 device ids are not stable between launches, so a saved id can be stale ("OverconstrainedError"):
   // then find the camera again by its name, and finally fall back to the default camera.
   const findByName = async () => {
@@ -384,10 +388,41 @@ function camera(deviceId, force, label) {
       return open(id ? want(id) : { width: { ideal: 1280 }, height: { ideal: 720 } });
     })
     .then(playing)
-    .then(() => dlog(`camera OK ${video.videoWidth}x${video.videoHeight}`))
+    .then(() => { dlog(`camera OK ${video.videoWidth}x${video.videoHeight} @${camFps(c)}`); checkCamFps(c, label); })
     .catch(failIt)
     .finally(() => guard(false));
   return c;
+}
+// 30 fps projects ask for exactly 30 (cheapest); 60 fps projects ask for 60 and take what the camera can give
+const camRate = () => (out().fps > 30 ? { ideal: 60 } : { ideal: 30, max: 30 });
+const camFps = (c) => { const t = c.stream && c.stream.getVideoTracks()[0], s = t && t.getSettings ? t.getSettings() : {}; return Math.round(s.frameRate || 0); };
+const camName = (s) => String(s || '').replace(/\s*\([0-9a-f]{4}:[0-9a-f]{4}\)$/i, '');
+const fpsWarned = new Set();
+function checkCamFps(c, label) {
+  if (out().fps <= 30 || !c.stream) return;
+  const f = camFps(c); if (!f || f >= 50) return;
+  const key = label || 'cam'; if (fpsWarned.has(key)) return; fpsWarned.add(key);
+  dlog(`camera only ${f} fps — warned`);
+  toast(T`กล้องนี้ได้แค่ ${f} fps` + (label ? ` (${camName(label)})` : '') + T` — ภาพจากกล้องจะไม่ลื่นขึ้น แต่ข้อความ เอฟเฟกต์ และภาพหน้าจอยังวาดที่ 60 fps`, { kind: 'warn' });
+}
+// switch the frame rate of every open camera / screen capture without reopening them
+async function applySourceFps() {
+  for (const c of cams.values()) {
+    const t = c.stream && c.stream.getVideoTracks()[0]; if (!t) continue;
+    const s = t.getSettings();
+    try { await t.applyConstraints({ width: { ideal: s.width || 1280 }, height: { ideal: s.height || 720 }, frameRate: camRate() }); } catch (err) { dlog('camera fps change failed ' + (err && err.name)); }
+    const n = t.getSettings(); dlog(`camera fps now ${camFps(c)} (${n.width}x${n.height})`);
+    checkCamFps(c, t.label);
+  }
+  for (const r of rt.values()) {
+    const t = r.own && r.el && r.el.srcObject && r.el.srcObject.getVideoTracks()[0];
+    if (t) t.applyConstraints({ frameRate: out().fps }).catch(() => {});
+  }
+}
+function setFps(v) {
+  const o = out(); v = v > 30 ? 60 : 30; if (o.fps === v) return;
+  o.fps = v; appliedFps = v; resetCap(); fpsWarned.clear(); commit(); bus.emit('fps', v); applySourceFps();
+  toast(v > 30 ? T`ตั้งเป็น 60 fps แล้ว — ภาพในโปรแกรมและวิดีโอที่อัดจะลื่นขึ้น (กล้องเสมือนยังส่ง 30 fps)` : T`ตั้งเป็น 30 fps แล้ว`);
 }
 function retryCamera(L) {
   const old = cams.get(L.deviceId || '');
@@ -449,7 +484,7 @@ async function addCamera() {
 }
 async function attachScreen(L) {
   let stream;
-  try { stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: 30 }, audio: false }); }
+  try { stream = await navigator.mediaDevices.getDisplayMedia({ video: { frameRate: out().fps }, audio: false }); }
   catch { return false; }
   const video = document.createElement('video'); video.muted = true; video.srcObject = stream; await video.play().catch(() => {});
   stopRuntime(L.id);
@@ -859,12 +894,12 @@ function filterOf(f) {
   if (f.hue) s += `hue-rotate(${f.hue}deg) `;
   if (f.gray) s += `grayscale(${f.gray}%) `;
   if (f.sepia) s += `sepia(${f.sepia}%) `;
-  if (f.blur) s += `blur(${f.blur}px) `;
+  if (f.blur) s += `blur(${f.blur * rs}px) `; // filters and shadows ignore the canvas transform → follow the render scale
   return s || 'none';
 }
-const setShadow = (L) => { ctx.shadowColor = 'rgba(8,12,40,.55)'; ctx.shadowBlur = L.shadow; ctx.shadowOffsetY = L.shadow * 0.35; };
+const setShadow = (L) => { ctx.shadowColor = 'rgba(8,12,40,.55)'; ctx.shadowBlur = L.shadow * rs; ctx.shadowOffsetY = L.shadow * 0.35 * rs; };
 const noShadow = () => { ctx.shadowColor = 'transparent'; ctx.shadowBlur = 0; ctx.shadowOffsetY = 0; };
-let frameNo = 0, alphaK = 1; // alphaK: opacity of the area being drawn (multiplies the layers inside it)
+let frameNo = 0, alphaK = 1, rs = 1; // alphaK: opacity of the area being drawn (multiplies the layers inside it)
 
 const segm = typeof Intl !== 'undefined' && Intl.Segmenter ? new Intl.Segmenter(undefined, { granularity: 'grapheme' }) : null, gCache = new Map();
 function graphemes(s) { // whole characters (Thai vowels and tone marks stay with their consonant)
@@ -930,8 +965,9 @@ function drawLayer(L, now) {
           let hasMask = false;
           if (L.ai.mode !== 'off') {
             if (segState() === 'idle') loadSegmenter().then(() => { if (segState() === 'failed') toast(T`โหลดโมเดล AI ไม่สำเร็จ`, { kind: 'err' }); renderProps(); });
-            if (segState() === 'ready' && L.type !== 'image' ? (frameNo + (r.seed ??= Math.floor(Math.random() * 2))) % 2 === 0 || !r.mask : !r.mask) {
-              const m = segment(r.el, r.mask); if (m) { r.mask = m; r.proc.setMask(m.bytes, m.w, m.h); }
+            const every = segEvery(liveFps(out().fps));
+            if (segState() === 'ready' && L.type !== 'image' ? (frameNo + (r.seed ??= Math.floor(Math.random() * every))) % every === 0 || !r.mask : !r.mask) {
+              const t0 = performance.now(), m = segment(r.el, r.mask); ema('seg', performance.now() - t0); if (m) { r.mask = m; r.proc.setMask(m.bytes, m.w, m.h); }
             }
             hasMask = !!r.mask;
           }
@@ -984,7 +1020,9 @@ const animEnv = { get scene() { return scene(); }, hands: HS, out, byId, fire: (
 let fpsN = 0, fpsT = performance.now();
 function draw() {
   const o = out();
-  ctx.setTransform(1, 0, 0, 1, 0, 0); ctx.globalAlpha = 1; ctx.filter = 'none'; ctx.globalCompositeOperation = 'source-over';
+  const t0 = performance.now();
+  rs = canvas.width / o.w;
+  ctx.setTransform(rs, 0, 0, rs, 0, 0); ctx.globalAlpha = 1; ctx.filter = 'none'; ctx.globalCompositeOperation = 'source-over';
   ctx.fillStyle = '#05060f'; ctx.fillRect(0, 0, o.w, o.h);
   frameNo++;
   const now = performance.now();
@@ -996,7 +1034,10 @@ function draw() {
   fpsN++;
   if (now - fpsT >= 1000) { $('st-text').textContent = `${Math.round(fpsN * 1000 / (now - fpsT))} fps`; fpsN = 0; fpsT = now; }
   placeGizmo();
+  ema('draw', performance.now() - t0);
+  if (recTrack) recTrack.requestFrame();
   bus.emit('frame', canvas);
+  frameDone(now, o.fps);
 }
 
 /* ----------------------------------------------------- output size change */
@@ -1044,10 +1085,16 @@ function layout() {
   box.style.width = Math.round(o.w * view) + 'px'; box.style.height = Math.round(o.h * view) + 'px';
   view = Math.round(o.w * view) / o.w;
 }
+let appliedFps = 0;
 function applyOut() {
   const o = out();
-  if (canvas.width !== o.w || canvas.height !== o.h) { canvas.width = o.w; canvas.height = o.h; }
+  // light mode / auto quality draw fewer pixels; the GPU converter scales the picture back to full size for the camera
+  const k = renderScale(), cw = Math.max(2, Math.round(o.w * k)), ch = Math.max(2, Math.round(o.h * k));
+  if (canvas.width !== cw || canvas.height !== ch) { canvas.width = cw; canvas.height = ch; }
   $('out-res').value = `${o.w}x${o.h}`;
+  $('out-fps').value = String(o.fps > 30 ? 60 : 30);
+  if (appliedFps && appliedFps !== o.fps) { bus.emit('fps', o.fps); applySourceFps(); } // undo / redo / loading a project changed it
+  appliedFps = o.fps;
   layout();
 }
 // axis-aligned box around several layers (their rotated corners)
@@ -1111,17 +1158,28 @@ function placeGizmo() {
 /* -------------------------------------------------------------- interaction */
 const toScene = (e) => { const r = box.getBoundingClientRect(); return { x: (e.clientX - r.left) / view, y: (e.clientY - r.top) / view }; };
 const toLocal = (L, p) => { const a = -L.rot * Math.PI / 180, dx = p.x - L.x, dy = p.y - L.y; return { x: dx * Math.cos(a) - dy * Math.sin(a), y: dx * Math.sin(a) + dy * Math.cos(a) }; };
-function hit(p) {
-  const a = layers();
+// every clickable layer under the point, top first. Small layers count as at least 24 screen px wide / high, so a thin
+// line of text or a small sticker can still be grabbed.
+function hitAll(p) {
+  const a = layers(), r = [], min = 12 / view;
   for (let i = a.length - 1; i >= 0; i--) {
     const L = a[i]; if (!AV(L).vis || L.lock || L.type === 'handfx') continue;
     const e = E(L); if (e.s && e.s.a < 0.5) continue;
-    const q = toLocal(e, p), hw = e.w / 2, hh = e.h / 2;
+    const q = toLocal(e, p), hw = Math.max(e.w / 2, min), hh = Math.max(e.h / 2, min);
     if (Math.abs(q.x) > hw || Math.abs(q.y) > hh) continue;
     if (L.type === 'frame') { const b = L.border + 10 / view; if (Math.abs(q.x) < hw - b && Math.abs(q.y) < hh - b) continue; }
-    return L;
+    r.push(L);
   }
-  return null;
+  return r;
+}
+const hit = (p) => hitAll(p)[0] || null;
+// what a press picks → [layer, swap]. Dragging on the selected layer moves it even when other layers lie on top of it;
+// a plain click (no drag) there still selects the top layer (`swap`, applied in endOp). Alt+click = the next layer below.
+function pick(p, e) {
+  const all = hitAll(p); if (!all.length) return [null, null];
+  if (e.altKey) { const i = all.findIndex((l) => l.id === selId); return [all[(i + 1) % all.length], null]; }
+  const k = !multi(e) && all.find((l) => selSet.has(l.id));
+  return k && k !== all[0] ? [k, all[0]] : [all[0], null];
 }
 // mode: undefined = only this one · 'toggle' (Ctrl) · 'add' · 'range' (Shift, in the layer list)
 function select(id, mode) {
@@ -1167,6 +1225,7 @@ function groupItems(list) {
 }
 box.addEventListener('pointerdown', (e) => {
   if (e.button !== 0 || e.target.closest('button')) return;
+  const e0x = e.clientX, e0y = e.clientY; pendingSwap = null;
   const p = toScene(e), hEl = e.target.closest('[data-h]');
   if (!hEl && scope && leaveAreaAt(p)) { /* clicked outside the area being edited: back out, then this click works out there */ }
   let L = sel();
@@ -1179,7 +1238,8 @@ box.addEventListener('pointerdown', (e) => {
     box.setPointerCapture(e.pointerId); e.preventDefault(); return;
   }
   if (!hEl) {
-    const H = hit(p);
+    const [H, swap] = pick(p, e);
+    pendingSwap = swap;
     if (multi(e)) { // Ctrl: add / remove from the selection; Ctrl on empty space adds a drag box
       if (H) { select(H.id, 'toggle'); if (!selSet.has(H.id)) { e.preventDefault(); return; } }
       else { op = { kind: 'marquee', r: { x0: p.x, y0: p.y, x1: p.x, y1: p.y }, add: true }; box.setPointerCapture(e.pointerId); e.preventDefault(); return; }
@@ -1189,7 +1249,7 @@ box.addEventListener('pointerdown', (e) => {
     const G = sels().filter((l) => l.type !== 'handfx');
     if (G.length > 1) { // drag the whole group
       const items = groupItems(G); if (!items.length) return;
-      op = { kind: 'gmove', items, p0: p, b: groupBox(G), moved: false };
+      op = { kind: 'gmove', items, p0: p, b: groupBox(G), moved: false, sx: e0x, sy: e0y, swap: pendingSwap };
       box.setPointerCapture(e.pointerId); e.preventDefault(); return;
     }
     L = H;
@@ -1201,7 +1261,7 @@ box.addEventListener('pointerdown', (e) => {
   } else {
     if (!L || L.lock) return;
     const e = E(L);
-    op = { kind: 'move', L, dx: p.x - e.x, dy: p.y - e.y, moved: false };
+    op = { kind: 'move', L, dx: p.x - e.x, dy: p.y - e.y, moved: false, sx: e0x, sy: e0y, swap: pendingSwap };
   }
   if (!op) return;
   if (hooks.begin) hooks.begin(op.L);
@@ -1244,7 +1304,9 @@ function groupRot(e, p) {
   }
 }
 box.addEventListener('pointermove', (e) => {
-  if (!op) return;
+  if (!op) { box.style.cursor = e.target === box || e.target.closest('#scene') ? (hit(toScene(e)) ? 'move' : '') : ''; return; }
+  // a click that wobbles a few pixels is a click, not a move
+  if ((op.kind === 'move' || op.kind === 'gmove') && !op.moved && Math.hypot(e.clientX - op.sx, e.clientY - op.sy) < 4) return;
   const p = toScene(e), L = op.L, o = out();
   if (op.kind === 'marquee') { op.r.x1 = p.x; op.r.y1 = p.y; showMarquee(op.r); return; }
   if (op.kind === 'gmove' || op.kind === 'move') stageAreaHint(e, p);
@@ -1280,6 +1342,7 @@ box.addEventListener('pointermove', (e) => {
       L.crop = c;
     } else if (L.type === 'text') { h = hy ? h : s.h * (w / s.w); w = s.w * (h / s.h); }
     else if (hx && hy && !e.shiftKey) { const k = Math.max(w / s.w, h / s.h); w = s.w * k; h = s.h * k; }
+    else if (MEDIA.has(L.type) && !e.shiftKey) { if (hx) h = s.h * (w / s.w); else w = s.w * (h / s.h); } // pictures / video never stretch from an edge either (Shift = stretch)
     const cx = ax + hx * w / 2, cy = ay + hy * h / 2, a = s.rot * Math.PI / 180;
     L.w = w / s.k / s.kx; L.h = h / s.k / s.ky;
     setCenter(L, s.x + cx * Math.cos(a) - cy * Math.sin(a), s.y + cx * Math.sin(a) + cy * Math.cos(a));
@@ -1301,9 +1364,11 @@ function stageAreaHint(e, p) {
     stageHint.style.transform = `translate(${e.clientX + 16}px,${e.clientY + 18}px)`;
   }
 }
+let pendingSwap = null;
 const endOp = () => {
   if (!op) return;
   const o = op; op = null; showGuides(null, null);
+  if (o.swap && !o.moved) { if (o.items) { if (hooks.end) for (const it of o.items) hooks.end(it.L); } else if (hooks.end) hooks.end(o.L); stageHint.classList.add('hidden'); select(o.swap.id); return; }
   stageHint.classList.add('hidden'); showStageDrop(null);
   if (o.into) { // finish the move first (one undo step together with the move into the area)
     if (o.items) { if (hooks.end) for (const it of o.items) hooks.end(it.L); } else if (hooks.end) hooks.end(o.L);
@@ -1791,7 +1856,7 @@ function libThumbs() {
     }
   }
 }
-let libT = 0;
+let libT = 0, libHtml = '';
 const renderLibSoon = () => { clearTimeout(libT); libT = setTimeout(() => { if ($('tab-lib').classList.contains('active')) renderLib(); }, 120); };
 const usedCount = (it) => project.scenes.reduce((n, sc) => n + allLayers(sc).filter((l) => (it.asset && l.asset === it.asset) || (it.media && l.media === it.media)).length, 0);
 function renderLib() {
@@ -1806,13 +1871,16 @@ function renderLib() {
       <span>${esc(x.name || '')}</span>
       <button class="icon-btn lib-x" data-x title="${kind === 'tpl' ? T`ลบเทมเพลต` : T`เอาออกจากคลัง`}">${icon('x')}</button></div>`;
   const keep = el.querySelector('.lib-q'), focus = keep && document.activeElement === keep;
-  el.innerHTML = `<div class="lib-head"><label class="field lib-search">${icon('search')}<input class="lib-q" type="text" spellcheck="false" placeholder="${T`ค้นหาในคลัง`}"></label>
+  const html = `<div class="lib-head"><label class="field lib-search">${icon('search')}<input class="lib-q" type="text" spellcheck="false" placeholder="${T`ค้นหาในคลัง`}"></label>
       <button class="icon-btn" data-imp="image" title="${T`นำเข้ารูปเข้าคลัง`}">${icon('image')}</button><button class="icon-btn" data-imp="video" title="${T`นำเข้าวิดีโอเข้าคลัง`}">${icon('film')}</button></div>
     <div class="chips lib-f">${chip('all', T`ทั้งหมด`)}${chip('image', T`รูป`)}${chip('video', T`วิดีโอ`)}${chip('tpl', T`เทมเพลต`)}</div>
     ${tp.length ? `<div class="lib-cap">${T`เทมเพลตพื้นที่`}</div><div class="lib-grid">${tp.map((x) => tile(x, 'tpl')).join('')}</div>` : ''}
     ${items.length ? `${tp.length ? `<div class="lib-cap">${T`รูปและวิดีโอ`}</div>` : ''}<div class="lib-grid">${items.map((x) => tile(x, x.kind)).join('')}</div>` : ''}
     ${!items.length && !tp.length ? `<div class="layers-empty">${q ? T`ไม่พบ “${libQuery}”` : T`คลังยังว่าง — รูปและวิดีโอที่นำเข้าจะมาอยู่ที่นี่เอง`}<br>${T`ลากไฟล์มาวางที่แท็บนี้ หรือกดปุ่มนำเข้าด้านบน`}</div>` : ''}
     <div class="panel-note">${T`คลิก = เพิ่มลงเวที · ลากไปวางบนเวที / บนพื้นที่แอนิเมชัน · คลิกขวาที่พื้นที่ → บันทึกเป็นเทมเพลต`}</div>`;
+  // nothing changed → keep the DOM: rebuilding it under the pointer replays every hover animation
+  if (html === libHtml && el.firstChild) return;
+  libHtml = html; el.innerHTML = html;
   const qi = el.querySelector('.lib-q'); qi.value = libQuery; if (focus) { qi.focus(); qi.setSelectionRange(qi.value.length, qi.value.length); }
   qi.oninput = () => { libQuery = qi.value; renderLib(); };
   qi.onkeydown = (e) => { e.stopPropagation(); if (e.key === 'Escape') { libQuery = ''; renderLib(); } };
@@ -1914,7 +1982,7 @@ async function saveTemplate(list) {
   const n = await promptBox(T`ชื่อเทมเพลต`, list.length === 1 ? list[0].name : T`เทมเพลต ${tpls().length + 1}`, T`บันทึก`); if (!n) return;
   const b = groupBox(list), o = out(), x0 = clamp(b.x0, 0, o.w), y0 = clamp(b.y0, 0, o.h), w = clamp(b.x1, 0, o.w) - x0, h = clamp(b.y1, 0, o.h) - y0;
   let thumb = '';
-  if (w > 2 && h > 2) { const k = Math.min(1, 220 / w), c = document.createElement('canvas'); c.width = Math.round(w * k); c.height = Math.round(h * k); try { c.getContext('2d').drawImage(canvas, x0, y0, w, h, 0, 0, c.width, c.height); thumb = c.toDataURL('image/jpeg', 0.75); } catch { /* */ } }
+  if (w > 2 && h > 2) { const k = Math.min(1, 220 / w), c = document.createElement('canvas'); c.width = Math.round(w * k); c.height = Math.round(h * k); try { c.getContext('2d').drawImage(canvas, x0 * rs, y0 * rs, w * rs, h * rs, 0, 0, c.width, c.height); thumb = c.toDataURL('image/jpeg', 0.75); } catch { /* */ } }
   tpls().unshift({ id: uid(), name: n.slice(0, 40), thumb, at: Date.now(), data: bundleOf(list) });
   queueSave();
   toast(T`บันทึกเทมเพลต “${n}” แล้ว — อยู่ในแท็บคลัง`, { label: T`เปิดคลัง`, action: () => showTab('lib') });
@@ -2045,10 +2113,11 @@ function drawPeek() {
     if (x1 - x0 > 2 && y1 - y0 > 2) { img = canvas; sx = x0; sy = y0; sw = x1 - x0; sh = y1 - y0; }
   }
   if (!img) { img = canvas; sw = o.w; sh = o.h; }
+  const q = img === canvas ? rs : 1; // the scene canvas may be drawn smaller than the scene (light mode)
   const W = 232, H = 150, k = Math.min(W / sw, H / sh), cw = Math.max(1, Math.round(sw * k)), ch = Math.max(1, Math.round(sh * k));
   if (cv.width !== cw || cv.height !== ch) { cv.width = cw; cv.height = ch; }
   const g = cv.getContext('2d'); g.clearRect(0, 0, cw, ch);
-  try { g.drawImage(img, sx, sy, sw, sh, 0, 0, cw, ch); } catch { /* source not ready */ }
+  try { g.drawImage(img, sx * q, sy * q, sw * q, sh * q, 0, 0, cw, ch); } catch { /* source not ready */ }
   peekRaf = requestAnimationFrame(drawPeek);
 }
 
@@ -2128,7 +2197,7 @@ function renderProps() {
   const color = (parent, label, obj, key) => { const d = row(parent, label, '<input type="color">'); const c = d.querySelector('input'); c.value = obj[key]; c.oninput = () => { obj[key] = c.value; live(obj, key); }; c.onchange = commit; return d; };
   const chips = (parent, items, cls = 'chips') => {
     const d = document.createElement('div'); d.className = cls;
-    for (const [label, run, on, ico] of items) { const b = document.createElement('button'); b.className = 'chip' + (on ? ' on' : ''); b.innerHTML = (ico ? icon(ico) : '') + `<span>${esc(label)}</span>`; b.onclick = () => { run(); commit(); renderProps(); renderLayers(); }; d.appendChild(b); }
+    for (const [label, run, on, ico, tip] of items) { const b = document.createElement('button'); b.className = 'chip' + (on ? ' on' : '') + (label ? '' : ' ico-only'); b.innerHTML = (ico ? icon(ico) : '') + (label ? `<span>${esc(label)}</span>` : ''); if (tip) b.title = tip; b.onclick = () => { run(); commit(); renderProps(); renderLayers(); }; d.appendChild(b); }
     parent.appendChild(d); return d;
   };
 
@@ -2231,7 +2300,7 @@ function renderProps() {
   const lay = sec('fit', T`ตำแหน่งและขนาด`);
   chips(lay, [
     [T`เต็มจอ`, each((X) => place(X, 'cover'))], [T`พอดีจอ`, each((X) => place(X, 'contain'))], [T`กึ่งกลาง`, each((X) => place(X, 'center'))], [T`วงกลม`, each((X) => place(X, 'bubble'))],
-    ['↖', each((X) => place(X, 'tl'))], ['↗', each((X) => place(X, 'tr'))], ['↙', each((X) => place(X, 'bl'))], ['↘', each((X) => place(X, 'br'))],
+    ['', each((X) => place(X, 'tl')), false, 'pipTl', T`มุมซ้ายบน`], ['', each((X) => place(X, 'tr')), false, 'pipTr', T`มุมขวาบน`], ['', each((X) => place(X, 'bl')), false, 'pipBl', T`มุมซ้ายล่าง`], ['', each((X) => place(X, 'br')), false, 'pipBr', T`มุมขวาล่าง`],
     [T`ครึ่งซ้าย`, each((X) => place(X, 'left'))], [T`ครึ่งขวา`, each((X) => place(X, 'right'))],
     [T`กลับซ้ายขวา`, () => { L.flipH = !L.flipH; }, L.flipH], [T`กลับบนล่าง`, () => { L.flipV = !L.flipV; }, L.flipV],
   ], 'grid4');
@@ -2244,6 +2313,18 @@ function renderProps() {
     inp.onchange = () => { if (apply()) { commit(); syncNums(); } };
     show(); numSync.push(show);
   }
+  // size that never stretches: 100 % = fits the screen (or the area it is in); every selected layer scales by the same factor
+  const fitW = (X) => { const P = parentOf(X.id), o = P ? { w: P.w, h: P.h } : out(), ar = X.w / Math.max(1e-6, X.h); return Math.min(o.w, o.h * ar); };
+  const scaleBy = (k) => { for (const X of [L, ...peers]) { if (X.lock || X.type === 'handfx') continue; X.w = Math.max(8, X.w * k); X.h = Math.max(8, X.h * k); } };
+  const Z = { get k() { return Math.round(L.w / fitW(L) * 100); }, set k(v) { scaleBy(Math.max(5, v) / 100 * fitW(L) / L.w); } };
+  slider(lay, T`ขนาด`, Z, 'k', 5, 300, 1, (v) => v + '%').title = T`ย่อ / ขยายโดยไม่ยืด — 100% = พอดีจอ`;
+  const n0 = MEDIA.has(L.type) ? natural(L) : null;
+  chips(lay, [
+    ['', () => scaleBy(1 / 1.1), false, 'zoomOut', T`ย่อลง 10%`],
+    ['', () => scaleBy(1.1), false, 'zoomIn', T`ขยาย 10%`],
+    n0 && [T`ขนาดจริง`, () => { const k = n0.w * (1 - L.crop.l - L.crop.r) / L.w; scaleBy(k); }, false, null, T`1 พิกเซลของรูป = 1 พิกเซลของภาพที่ส่งออก`],
+    n0 && [T`แก้ภาพยืด`, each((X) => { const n = natural(X); if (!n) return; const ar = cropAspect(X, n), a = Math.sqrt(X.w * X.h); X.w = a * Math.sqrt(ar); X.h = a / Math.sqrt(ar); }), false, 'ratio', T`คืนสัดส่วนเดิมของรูป / วิดีโอ (ขนาดพื้นที่เท่าเดิม)`],
+  ].filter(Boolean), 'chips size-row');
   slider(lay, T`หมุน`, L, 'rot', -180, 180, 1, (v) => Math.round(v) + '°');
   slider(lay, T`ความทึบ`, L, 'op', 0, 1, 0.01, (v) => Math.round(v * 100) + '%');
 
@@ -2358,20 +2439,23 @@ async function saveBlob(blob, name) {
   } else { const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = name; a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000); toast(T`บันทึกแล้ว: ${name}`); }
 }
 function snapshot() { canvas.toBlob((b) => b && saveBlob(b, `PrismCam-${stamp()}.png`), 'image/png'); }
-let rec = null;
+let rec = null, recTrack = null;
 async function toggleRecord() {
   const btn = $('btn-rec');
   if (rec) { rec.stop(); return; }
-  const stream = canvas.captureStream(out().fps);
+  // captureStream(0) + requestFrame() after every draw: exactly one video frame per drawn frame. The automatic
+  // capture (captureStream(fps)) samples on screen refresh and lost ~15 % of the frames at 60 fps.
+  const stream = canvas.captureStream(0);
+  recTrack = stream.getVideoTracks()[0];
   let mic = null;
   try { mic = await navigator.mediaDevices.getUserMedia({ audio: true }); mic.getAudioTracks().forEach((t) => stream.addTrack(t)); } catch { /* no microphone → silent video */ }
-  const mime = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find((m) => MediaRecorder.isTypeSupported(m));
+  const mime = window.__recMime || ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find((m) => MediaRecorder.isTypeSupported(m));
   const chunks = [], t0 = Date.now();
-  rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 8e6 });
+  rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: out().fps > 30 ? 12e6 : 8e6 });
   rec.ondataavailable = (e) => { if (e.data.size) chunks.push(e.data); };
   const timer = setInterval(() => { const s = Math.floor((Date.now() - t0) / 1000); $('rec-label').textContent = `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; }, 500);
   rec.onstop = () => {
-    clearInterval(timer); rec = null; btn.classList.remove('on'); $('rec-label').textContent = T`อัดวิดีโอ`;
+    clearInterval(timer); rec = null; recTrack = null; btn.classList.remove('on'); $('rec-label').textContent = T`อัดวิดีโอ`;
     if (mic) mic.getTracks().forEach((t) => t.stop());
     saveBlob(new Blob(chunks, { type: 'video/webm' }), `PrismCam-${stamp()}.webm`);
   };
@@ -2394,6 +2478,7 @@ export async function startStudio() {
   bus.on('studio:refresh', () => { if ($('tab-lib').classList.contains('active')) renderLibSoon(); });
   $('scene-add').onclick = () => { project.scenes.push({ id: uid(), name: T`ซีน ${project.scenes.length + 1}`, layers: [] }); project.cur = project.scenes.length - 1; selId = null; commit(); syncRuntime(); refreshAll(); };
   $('out-res').onchange = () => resizeOut(...$('out-res').value.split('x').map(Number));
+  $('out-fps').onchange = () => setFps(+$('out-fps').value);
   $('btn-undo').onclick = () => step(ZONES, true);
   $('btn-snap').onclick = snapshot;
   $('btn-rec').onclick = toggleRecord;
@@ -2416,12 +2501,24 @@ export async function startStudio() {
   });
   // a worker drives the frame clock so the output keeps running while the window is minimised or covered
   let ticking = false;
-  const tick = () => { if (ticking) return; ticking = true; try { draw(); } finally { ticking = false; } };
+  // a PC that falls behind gets a queue of ticks: drop the ones that arrive right after a frame instead of drawing them all late
+  // frames follow a fixed schedule (every 1000/fps ms): timer jitter neither adds frames nor loses them, and a late PC
+  // restarts the schedule instead of catching up with a burst
+  let due = 0;
+  const tick = () => {
+    if (ticking) return;
+    const t = performance.now(), step = 1000 / liveFps(out().fps);
+    if (t < due - step * 0.3) return; // a tick a little early still counts (the worker ticks at the same rate)
+    due = t - due > step ? t + step : due + step;
+    ticking = true; try { draw(); } finally { ticking = false; }
+  };
+  bus.on('perf', applyOut);
   try {
     const w = new Worker(new URL('./tick.js', import.meta.url));
-    w.onmessage = tick; w.postMessage(out().fps);
-    bus.on('out', (o) => w.postMessage(o.fps));
-  } catch { setInterval(tick, 1000 / out().fps); }
+    const rate = () => w.postMessage(liveFps(out().fps));
+    w.onmessage = tick; rate();
+    bus.on('out', rate); bus.on('fps', rate); bus.on('perf', rate);
+  } catch { setInterval(tick, 1000 / 30); }
   // first selection change also opens the properties tab once, so new users discover it
   let hinted = false;
   bus.on('added', () => { if (!hinted) { hinted = true; showTab('props'); } });

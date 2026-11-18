@@ -130,6 +130,7 @@ pub fn stop() {
 
 /* ------------------------------------------------------------------------- frames */
 /// RGBA (w×h) → NV12 (BT.709, video range) into the shared frame file.
+/// RGBA → NV12 (BT.601 limited range), split over the CPU cores: one 720p frame is ~1 M pixels, 30 times a second.
 pub fn push(rgba: &[u8], w: usize, h: usize) -> bool {
     let (w2, h2) = (w & !1, h & !1);
     if w2 < 2 || h2 < 2 || w2 * h2 > FRAME_MAX_PIXELS || rgba.len() < w * h * 4 { return false; }
@@ -138,32 +139,54 @@ pub fn push(rgba: &[u8], w: usize, h: usize) -> bool {
     unsafe {
         let dst = std::slice::from_raw_parts_mut(host.view.add(FRAME_HEADER), w2 * h2 * 3 / 2);
         let (ys, uvs) = dst.split_at_mut(w2 * h2);
-        for y in 0..h2 {
-            let row = &rgba[y * w * 4..];
-            let out = &mut ys[y * w2..(y + 1) * w2];
-            for x in 0..w2 {
-                let (r, g, b) = (row[x * 4] as i32, row[x * 4 + 1] as i32, row[x * 4 + 2] as i32);
-                out[x] = (16 + ((47 * r + 157 * g + 16 * b + 128) >> 8)) as u8;
+        let threads = std::thread::available_parallelism().map_or(2, |n| n.get()).clamp(1, 4);
+        let band = (h2 / 2).div_ceil(threads) * 2; // rows per thread, even so every thread owns whole chroma rows
+        std::thread::scope(|sc| {
+            for (i, (yb, uvb)) in ys.chunks_mut(band * w2).zip(uvs.chunks_mut(band / 2 * w2)).enumerate() {
+                let y0 = i * band;
+                sc.spawn(move || {
+                    for (dy, out) in yb.chunks_exact_mut(w2).enumerate() {
+                        let row = &rgba[(y0 + dy) * w * 4..];
+                        for x in 0..w2 {
+                            let (r, g, b) = (row[x * 4] as i32, row[x * 4 + 1] as i32, row[x * 4 + 2] as i32);
+                            out[x] = (16 + ((47 * r + 157 * g + 16 * b + 128) >> 8)) as u8;
+                        }
+                    }
+                    for (dy, out) in uvb.chunks_exact_mut(w2).enumerate() {
+                        let y = y0 / 2 + dy;
+                        let (r0, r1) = (&rgba[(y * 2) * w * 4..], &rgba[(y * 2 + 1) * w * 4..]);
+                        for x in 0..w2 / 2 {
+                            let i = x * 8;
+                            let r = (r0[i] as i32 + r0[i + 4] as i32 + r1[i] as i32 + r1[i + 4] as i32) >> 2;
+                            let g = (r0[i + 1] as i32 + r0[i + 5] as i32 + r1[i + 1] as i32 + r1[i + 5] as i32) >> 2;
+                            let b = (r0[i + 2] as i32 + r0[i + 6] as i32 + r1[i + 2] as i32 + r1[i + 6] as i32) >> 2;
+                            out[x * 2] = (128 + ((-26 * r - 87 * g + 112 * b + 128) >> 8)).clamp(0, 255) as u8;
+                            out[x * 2 + 1] = (128 + ((112 * r - 102 * g - 10 * b + 128) >> 8)).clamp(0, 255) as u8;
+                        }
+                    }
+                });
             }
-        }
-        for y in 0..h2 / 2 {
-            let (r0, r1) = (&rgba[(y * 2) * w * 4..], &rgba[(y * 2 + 1) * w * 4..]);
-            let out = &mut uvs[y * w2..(y + 1) * w2];
-            for x in 0..w2 / 2 {
-                let i = x * 8;
-                let r = (r0[i] as i32 + r0[i + 4] as i32 + r1[i] as i32 + r1[i + 4] as i32) >> 2;
-                let g = (r0[i + 1] as i32 + r0[i + 5] as i32 + r1[i + 1] as i32 + r1[i + 5] as i32) >> 2;
-                let b = (r0[i + 2] as i32 + r0[i + 6] as i32 + r1[i + 2] as i32 + r1[i + 6] as i32) >> 2;
-                out[x * 2] = (128 + ((-26 * r - 87 * g + 112 * b + 128) >> 8)).clamp(0, 255) as u8;
-                out[x * 2 + 1] = (128 + ((112 * r - 102 * g - 10 * b + 128) >> 8)).clamp(0, 255) as u8;
-            }
-        }
-        host.seq = host.seq.wrapping_add(1).max(1);
-        let head = host.view as *mut u32;
-        head.add(1).write_volatile(w2 as u32);
-        head.add(2).write_volatile(h2 as u32);
-        head.add(3).write_volatile(host.seq);
-        head.write_volatile(FRAME_MAGIC);
+        });
+        publish(&mut host, w2, h2);
     }
     true
+}
+/// A frame the graphics chip already converted (perf.js `nv12`): Y plane then interleaved UV, w×h, no padding.
+pub fn push_nv12(nv: &[u8], w: usize, h: usize) -> bool {
+    if w < 2 || h < 2 || w % 2 != 0 || h % 2 != 0 || w * h > FRAME_MAX_PIXELS || nv.len() < w * h * 3 / 2 { return false; }
+    let mut host = HOST.lock().unwrap();
+    if host.view.is_null() { return false; }
+    unsafe {
+        std::ptr::copy_nonoverlapping(nv.as_ptr(), host.view.add(FRAME_HEADER), w * h * 3 / 2);
+        publish(&mut host, w, h);
+    }
+    true
+}
+unsafe fn publish(host: &mut Host, w: usize, h: usize) {
+    host.seq = host.seq.wrapping_add(1).max(1);
+    let head = host.view as *mut u32;
+    head.add(1).write_volatile(w as u32);
+    head.add(2).write_volatile(h as u32);
+    head.add(3).write_volatile(host.seq);
+    head.write_volatile(FRAME_MAGIC);
 }

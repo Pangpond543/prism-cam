@@ -12,4 +12,8 @@ Format: `YYYY-MM-DD — idea — status (reason if given)`
 - 2026-11-16 — Onion skin on stage — ทำแล้ว
 - 2026-11-16 — Auto-calibrate hand range (wave for 3 s) — ยังไม่ทำ (ไม่ได้เลือก)
 - 2026-11-16 — Record hand motion into keyframes — ยังไม่ทำ (ไม่ได้เลือก)
+- 2026-11-18 — Light mode / GPU NV12 conversion / automatic quality / speed panel — ทำแล้ว
+- 2026-11-18 — 60 fps content / recording (virtual camera stays 30) — ทำแล้ว
+- 2026-11-18 — Virtual camera at 60 fps — ไม่เอา (Discord ได้แค่ 30)
+- 2026-11-18 — Turn hardware MJPEG / video decode back on (switches from the unconfirmed AMD theory) — ยังไม่ทำ (ไม่ได้เลือก; ทดสอบทีละ switch ตาม pitfalls)
 - 2026-11-16 — One hand drives two clips (left-right + up-down, joystick) — ยังไม่ทำ (ไม่ได้เลือก)

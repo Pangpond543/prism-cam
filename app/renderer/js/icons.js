@@ -73,6 +73,13 @@ Object.assign(ICONS, {
   front: S('<path d="M12 19V6M6.500 11.500L12 6l5.500 5.500M5 3.500h14"/>'),
   back: S('<path d="M12 5v13M6.500 12.500L12 18l5.500-5.500M5 20.500h14"/>'),
   hand: S('<path d="M8 12.5V6a1.5 1.5 0 0 1 3 0v5M11 11V4.5a1.5 1.5 0 0 1 3 0V11M14 11V5.5a1.5 1.5 0 0 1 3 0V12M17 9.5a1.5 1.5 0 0 1 3 0V14a7 7 0 0 1-7 7h-.6a6 6 0 0 1-4.6-2.2L4.3 14.6a1.6 1.6 0 0 1 2.4-2.1L8 14"/>'),
+  pipTl: S('<rect x="3" y="5" width="18" height="14" rx="3"/><rect x="5.5" y="7.5" width="7" height="5" rx="1.4" fill="currentColor" stroke="none"/>'),
+  pipTr: S('<rect x="3" y="5" width="18" height="14" rx="3"/><rect x="11.5" y="7.5" width="7" height="5" rx="1.4" fill="currentColor" stroke="none"/>'),
+  pipBl: S('<rect x="3" y="5" width="18" height="14" rx="3"/><rect x="5.5" y="11.5" width="7" height="5" rx="1.4" fill="currentColor" stroke="none"/>'),
+  pipBr: S('<rect x="3" y="5" width="18" height="14" rx="3"/><rect x="11.5" y="11.5" width="7" height="5" rx="1.4" fill="currentColor" stroke="none"/>'),
+  zoomIn: S('<circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2M8.5 11h5M11 8.5v5"/>'),
+  zoomOut: S('<circle cx="11" cy="11" r="6.5"/><path d="M20 20l-4.2-4.2M8.5 11h5"/>'),
+  ratio: S('<rect x="3.5" y="6" width="17" height="12" rx="2.5"/><path d="M7 9.5v2M7 9.5h2M17 14.5v-2M17 14.5h-2"/>'),
   center: S('<path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><rect x="8" y="8" width="8" height="8" rx="2"/>'),
 });
 

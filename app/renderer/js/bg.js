@@ -97,6 +97,9 @@ export function startBackground(canvas) {
   const frame = (now) => {
     requestAnimationFrame(frame);
     if (dead || document.hidden || !gl || gl.isContextLost() || now - last < 42) return;
+    // light mode: the background stands still (one frame, plus the cross-fade when the theme changes)
+    const want = document.documentElement.dataset.theme === 'dark' ? 1 : 0;
+    if (document.documentElement.classList.contains('lite') && last && Math.abs(want - dark) < 0.01 && now - last < 2000) return;
     last = now;
     mx += (tx - mx) * 0.09; my += (ty - my) * 0.09; // light trails the pointer with inertia
     gl.uniform2f(uRes, canvas.width, canvas.height);

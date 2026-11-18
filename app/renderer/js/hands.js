@@ -1,5 +1,6 @@
 // Hand tracking manager: feeds camera frames to the worker, keeps a stable "track" per hand, smooths the 21 landmarks
 // (One Euro filter), predicts them forward to hide the model's latency, and turns finger poses into named gestures.
+import { handGap } from './perf.js';
 import { api, native, bus, T } from './core.js';
 import { predict, trainedSet, customList, customPairList, predictPair, trainedPairSet } from './handml.js';
 const log = (m) => { try { if (native) api.invoke('app:log', m); } catch { /* */ } };
@@ -124,16 +125,18 @@ export function stopHands() {
 export function retryHands() { stopHands(); }
 
 // called every frame with the element that shows the tracked camera
+let lastFeed = 0;
 export function feedHands(el, now) {
   if (hands.state === 'off') start();
   if (hands.state !== 'ready') return;
   if (busy && now - busyAt > 2500) busy = false; // the worker never answered: do not stall forever
   if (busy || grabbing) return;
+  if (now - lastFeed < handGap()) return; // ~30 a second (15 in light mode): more only costs CPU
   const vw = el.videoWidth || el.naturalWidth || 0, vh = el.videoHeight || el.naturalHeight || 0;
   if (!vw || !vh) return;
   hands.ar = vw / vh;
   const k = Math.min(1, 640 / vw);
-  grabbing = true;
+  grabbing = true; lastFeed = now;
   createImageBitmap(el, { resizeWidth: Math.round(vw * k), resizeHeight: Math.round(vh * k), resizeQuality: 'low' })
     .then((bmp) => { if (!worker || hands.state !== 'ready') { bmp.close(); return; } busy = true; busyAt = now; worker.postMessage({ t: 'frame', bmp, ts: now }, [bmp]); }, () => {})
     .finally(() => { grabbing = false; });

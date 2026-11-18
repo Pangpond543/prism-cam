@@ -218,7 +218,26 @@ fn vcam_install() -> Value { vcam_host::install() }
 fn vcam_frame(request: Request<'_>) -> Result<(), String> {
     let InvokeBody::Raw(bytes) = request.body() else { return Err("body".into()) };
     let (w, h) = (header(&request, "x-w").parse().unwrap_or(0usize), header(&request, "x-h").parse().unwrap_or(0usize));
-    if vcam_host::push(bytes, w, h) { Ok(()) } else { Err("frame".into()) }
+    let ok = if header(&request, "x-fmt") == "nv12" { vcam_host::push_nv12(bytes, w, h) } else { vcam_host::push(bytes, w, h) };
+    if ok { Ok(()) } else { Err("frame".into()) }
+}
+/// whole-PC CPU use in % since the previous call (the speed panel and auto quality ask once a second)
+#[tauri::command]
+fn perf_cpu() -> i32 {
+    use std::sync::Mutex;
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::System::Threading::GetSystemTimes;
+    static LAST: Mutex<(u64, u64)> = Mutex::new((0, 0));
+    let (mut idle, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default());
+    if unsafe { GetSystemTimes(Some(&mut idle), Some(&mut kernel), Some(&mut user)) }.is_err() { return -1; }
+    let v = |f: FILETIME| ((f.dwHighDateTime as u64) << 32) | f.dwLowDateTime as u64;
+    let (idle, total) = (v(idle), v(kernel) + v(user)); // kernel time includes idle time
+    let mut last = LAST.lock().unwrap();
+    let (di, dt) = (idle.wrapping_sub(last.0), total.wrapping_sub(last.1));
+    let first = last.1 == 0;
+    *last = (idle, total);
+    if first || dt == 0 { return -1; }
+    (100.0 * (dt.saturating_sub(di)) as f64 / dt as f64).round().clamp(0.0, 100.0) as i32
 }
 
 fn main() {
@@ -232,7 +251,7 @@ fn main() {
     tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             win_min, win_max, app_log, win_close, app_ready, app_relaunch, about_info, about_openRepo, update_check, update_apply,
-            project_load, project_save, media_save, media_reveal, media_put, media_has, media_gc, vcam_start, vcam_stop, vcam_install, vcam_frame,
+            project_load, project_save, media_save, media_reveal, media_put, media_has, media_gc, vcam_start, vcam_stop, vcam_install, vcam_frame, perf_cpu,
             input::input_arm, input::input_pointer, input::input_run, input::input_pick, hand_load, hand_save, hand_export
         ])
         .register_asynchronous_uri_scheme_protocol("pmedia", |ctx, req, responder| {

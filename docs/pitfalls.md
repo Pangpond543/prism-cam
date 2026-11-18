@@ -7,6 +7,14 @@
 - **Copy into `app\bin` fails** → Prism Cam is running → `taskkill //F //IM prism-cam.exe` first.
 - **Virtual camera missing in Discord after a DLL change** → installed DLL in `%ProgramFiles%\Prism Cam` is the old one → user presses Start virtual camera and accepts UAC again.
 - **Test hook leaves app in English/dark** → `en`/`dark` persist → run `PRISM_ACT=th,light`.
+- **Speed tests on a freshly built exe show 100 % CPU** → Windows scans the new exe for the first minute; auto quality then drops to 50 %. → Wait a minute after building before measuring; compare runs back to back.
+- **GPU converter saved nothing (2026-11-18)** → with a CPU (`willReadFrequently`) scene canvas, uploading it to WebGL each frame costs as much as the conversion saves, and a plain `readPixels` blocks ~7 ms. → The scene canvas must be a GPU canvas when the converter is on, and read back asynchronously (PBO + fence). Both are in place; keep them together.
+- **Hover flicker on cards that lift (`translateY` on :hover)** → the box slides off a pointer on its bottom edge. → Give it a hover strip (`::after` below it, see cam.css) or move only the inner content.
+- **Ctrl+Z per zone under the mouse** confused the user (2026-11-18) → undo is global (newest change first). Don't bring zone-by-mouse back.
+- **Native `<select>` look** → never ship a bare select: `select.js` styles all of them automatically; check new ones render as `.gs-btn`.
+- **Recording at 60 fps came out ~50 fps** → `canvas.captureStream(fps)` samples on screen refresh, and the draw timer drifts against it. → `captureStream(0)` + `track.requestFrame()` after each draw. Not an encoder limit (VP9 / VP8 / H.264 all gave the same 50–52).
+- **Virtual camera at 60 fps** → not done on purpose: Discord takes 30 from a camera, and changing the DLL forces every user to reinstall the camera (UAC). The app sends ≤ 30 to it.
+- **AI "remove background" sends a black picture** → nobody is in front of the camera (the model finds no person). Not a bug; test with a person or with "blur".
 - **MediaPipe worker fails to load** → hand worker must stay a CLASSIC worker (MediaPipe uses importScripts) and CSP needs `wasm-unsafe-eval` + `worker-src blob:`.
 
 
