@@ -1,11 +1,17 @@
 // Prism Cam studio: scenes → layers → 2D compositor, free transform gizmo, layer list and property panel.
 import { api, native, bus, T, toast, htmlBox, promptBox, ctxMenu, esc, clamp, $, remember, recall } from './core.js';
 import { icon } from './icons.js';
-import { createProc, loadSegmenter, segment, segState } from './fx.js';
-import { perf, renderScale, liveFps, resetCap, segEvery, ema, frameDone } from './perf.js';
-import { hands, feedHands, poseHands, stopHands, pruneHands, setHandOptions, BONES, gestureList, gestureName, pairList } from './hands.js';
+import { createProc, loadSegmenter, segState, segFeed, segTake, segKeep } from './fx.js';
+import { perf, renderScale, liveFps, resetCap, segEvery, ema, frameDone, handGap } from './perf.js';
+import { hands, handsReady, poseHands, stopHands, pruneHands, setHandOptions, BONES, gestureList, gestureName, pairList } from './hands.js';
 import { customList, modelReady } from './handml.js';
 import { drawHandFx, dropHandFx, clearHandDrawing, FX_DEFAULT } from './handfx.js';
+import { feedAi, pruneAi } from './ai.js';
+import { face, facesReady, placeFaces, sceneFaces, faceAnchor, faceExprSince, setFaceOptions, FACE_DEF, ZONE_RING } from './face.js';
+import { FACE_PTS, faceFit, faceExprList, isFaceDrive, faceExprName, zoneOfPt, faceZoneName } from './facedefs.js';
+import { drawFacePaint, paintSource, PAINTS, faceTemplate, paintThumb, FACE_LINES } from './facepaint.js';
+import { drawAvatar, AVATARS, AV_SLOTS, AV_DEF } from './avatar.js';
+import { FACE_PACK, packPng, packThumb } from './facepack.js';
 import { frame as animFrame, AV, kxOf, kyOf, uid as auid, PROPS as APROPS, fixClip, evalTrack } from './anim-core.js';
 
 // GPU canvas when the graphics chip converts the camera picture (perf.js nv12: no per-frame CPU read-back at all);
@@ -15,20 +21,25 @@ const canvas = $('scene'), ctx = canvas.getContext('2d', { willReadFrequently: !
 const box = $('scene-box'), gizmo = $('gizmo'), guides = $('guides');
 const uid = () => Math.random().toString(36).slice(2, 9);
 const MEDIA = new Set(['camera', 'screen', 'image', 'video']);
-const TYPE_ICON = { camera: 'camera', screen: 'screen', image: 'image', video: 'film', text: 'text', shape: 'shape', frame: 'frame', handfx: 'hand', area: 'area' };
-const typeLabel = (t) => ({ camera: T`กล้อง`, screen: T`หน้าจอ`, image: T`รูปภาพ`, video: T`วิดีโอ`, text: T`ข้อความ`, shape: T`รูปทรง`, frame: T`กรอบ`, handfx: T`เอฟเฟกต์มือ`, area: T`พื้นที่แอนิเมชัน` }[t] || t);
+// layers that cover the whole stage and draw from the trackers (no box, no area, no copy)
+const FULLFX = new Set(['handfx', 'facepaint']);
+const TYPE_ICON = { camera: 'camera', screen: 'screen', image: 'image', video: 'film', text: 'text', shape: 'shape', frame: 'frame', handfx: 'hand', area: 'area', facepaint: 'face', avatar: 'face' };
+const typeLabel = (t) => ({ camera: T`กล้อง`, screen: T`หน้าจอ`, image: T`รูปภาพ`, video: T`วิดีโอ`, text: T`ข้อความ`, shape: T`รูปทรง`, frame: T`กรอบ`, handfx: T`เอฟเฟกต์มือ`, area: T`พื้นที่แอนิเมชัน`, facepaint: T`ลายบนหน้า`, avatar: T`ตัวละคร VTuber` }[t] || t);
 
 /* ------------------------------------------------------------------ project */
 // hand tracking settings live in the project (saved with it, but not part of undo)
 const HAND_CFG = { on: false, src: '', n: 2, gpu: true, smooth: 50, predict: 70, swap: false, overlay: true, binds: [], poses: [], mouse: { hand: 'any', zone: 55, mirror: true, glide: 30, click: true, rclick: true, scroll: true, sens: 50 } };
 const HAND_DEF = { on: false, side: 'any', pt: 'palm', rot: false, scale: false, ref: 0, dx: 0, dy: 0, lost: 'hide', gest: '', smooth: 25 };
+// a layer that rides the face (see facePose)
+const LFACE_DEF = { on: false, pt: 'eyes', who: '0', rot: true, scale: true, turn: true, ref: 0, dx: 0, dy: 0, lost: 'hide', expr: '', smooth: 10, fit: false, ratio: 1, dyK: 0, cycle: false };
 const fresh = () => ({ v: 1, out: { w: 1280, h: 720, fps: 30 }, cur: 0, scenes: [{ id: uid(), name: T`ซีน 1`, layers: [] }], assets: {}, hand: JSON.parse(JSON.stringify(HAND_CFG)) });
 function ensureHand() {
   const h = project.hand = { ...JSON.parse(JSON.stringify(HAND_CFG)), ...(project.hand || {}) };
   h.mouse = { ...HAND_CFG.mouse, ...(h.mouse || {}) };
   if (!Array.isArray(h.binds)) h.binds = [];
   if (!Array.isArray(h.poses)) h.poses = [];
-  applyHandCfg();
+  project.face = { ...FACE_DEF, ...(project.face || {}) }; // face tracking settings (saved with the project, not undone)
+  applyHandCfg(); setFaceOptions(project.face);
 }
 function applyHandCfg() { const h = project.hand; setHandOptions({ hands: h.n, gpu: h.gpu, smooth: h.smooth, predict: h.predict, swap: h.swap, poses: h.poses }); }
 export let project = fresh();
@@ -160,7 +171,12 @@ export async function save() {
 }
 async function load() {
   let json = null;
-  if (native) { const r = await api.invoke('project:load').catch(() => null); json = r && r.ok ? r.data : null; }
+  if (native) {
+    const r = await api.invoke('project:load').catch(() => null); json = r && r.ok ? r.data : null;
+    // the saved file was damaged: it is kept aside (never overwritten) and the previous save is used
+    if (r && r.restored) setTimeout(() => toast(T`ไฟล์งานที่บันทึกไว้เสียหาย — เปิดงานที่บันทึกก่อนหน้านั้นแทน (ไฟล์ที่เสียเก็บไว้ ไม่ได้ลบ)`, { kind: 'warn' }), 1500);
+    else if (r && r.broken) setTimeout(() => toast(T`ไฟล์งานที่บันทึกไว้เสียหายและไม่มีสำเนาก่อนหน้า — เริ่มงานใหม่ (ไฟล์ที่เสียเก็บไว้ ไม่ได้ลบ)`, { kind: 'err' }), 1500);
+  }
   else json = recall('prismcam.project', null);
   if (!json) return;
   try {
@@ -184,12 +200,13 @@ function newLayer(type, extra = {}) {
     key: { on: false, color: '#00d000', sim: 30, smooth: 12, spill: 50 },
     ai: { mode: 'off', blur: 14, invert: false },
     hand: { ...HAND_DEF },
+    face: { ...LFACE_DEF },
     fresh: true, ...extra,
   };
 }
 function addLayer(L, { select = true } = {}) {
   const A = curArea();
-  if (A && L.type === 'handfx') exitAll();
+  if (A && FULLFX.has(L.type)) exitAll();
   else if (A) { // a new layer inside an area starts in the middle of it, no bigger than it
     L.x = A.x; L.y = A.y;
     const k = Math.min(1, (A.w * 0.8) / L.w, (A.h * 0.8) / L.h); if (k < 1 && L.type !== 'text') { L.w *= k; L.h *= k; } else if (k < 1) L.h *= k;
@@ -369,6 +386,14 @@ function camera(deviceId, force, label) {
   // wait for real frames: a camera that hands over a stream but never delivers a picture must not leave the layer on "Opening…"
   const playing = (s) => {
     c.stream = s; video.srcObject = s; dlog('camera stream granted');
+    // unplugged / taken away by Windows: show it on the layer (not a frozen picture) and reopen when it comes back
+    s.getVideoTracks().forEach((t) => t.addEventListener('ended', () => {
+      if (c.stream !== s) return;
+      c.stream = null; c.failed = true; c.lost = true; c.err = T`กล้องหลุด`; video.srcObject = null;
+      for (const r of rt.values()) if (r.cam === c) r.ready = false;
+      dlog(`camera LOST ${label}`);
+      toast(T`กล้องหลุด — เสียบกลับแล้ว Prism Cam จะเปิดให้เอง`, { kind: 'err' });
+    }));
     return Promise.race([
       video.play().then(() => new Promise((res, rej) => { const t0 = Date.now(), w = () => (video.videoWidth ? res() : Date.now() - t0 > 8000 ? rej(new Error('no frames')) : setTimeout(w, 100)); w(); })),
       new Promise((_, rej) => setTimeout(() => rej(new Error('no frames')), 12000)),
@@ -424,12 +449,28 @@ function setFps(v) {
   o.fps = v; appliedFps = v; resetCap(); fpsWarned.clear(); commit(); bus.emit('fps', v); applySourceFps();
   toast(v > 30 ? T`ตั้งเป็น 60 fps แล้ว — ภาพในโปรแกรมและวิดีโอที่อัดจะลื่นขึ้น (กล้องเสมือนยังส่ง 30 fps)` : T`ตั้งเป็น 30 fps แล้ว`);
 }
-function retryCamera(L) {
-  const old = cams.get(L.deviceId || '');
-  if (old && old.stream) old.stream.getTracks().forEach((t) => t.stop());
-  cams.delete(L.deviceId || ''); rt.delete(L.id);
+function retryCamera(L) { reopenCams([L.deviceId || '']); }
+// reopen cameras: every layer showing them (any scene) gets the new stream, not only the one that was double-clicked
+function reopenCams(ids) {
+  for (const id of ids) {
+    const old = cams.get(id);
+    if (old && old.stream) old.stream.getTracks().forEach((t) => t.stop());
+    cams.delete(id);
+    for (const [lid, r] of [...rt]) if (r.cam && (r.cam === old || !old)) { const L = byId(lid) || project.scenes.flatMap((sc) => allLayers(sc)).find((l) => l.id === lid); if (L && (L.deviceId || '') === id) rt.delete(lid); }
+  }
   syncRuntimeForce = true; syncRuntime();
 }
+// a camera was plugged in (or Windows re-listed the devices): reopen cameras that were lost or failed to open
+let devTimer = 0;
+if (navigator.mediaDevices && navigator.mediaDevices.addEventListener) navigator.mediaDevices.addEventListener('devicechange', () => {
+  clearTimeout(devTimer);
+  devTimer = setTimeout(() => {
+    const ids = [...cams].filter(([, c]) => c.failed && !c.held && (c.lost || !c.stream)).map(([id]) => id);
+    if (!ids.length) return;
+    dlog(`devicechange → reopen ${ids.length} camera(s)`);
+    reopenCams(ids);
+  }, 1500);
+});
 let syncRuntimeForce = false;
 function stopRuntime(id) {
   const r = rt.get(id); if (!r) return;
@@ -590,6 +631,19 @@ function openAreaTimeline(A, make, clipId) {
   if (!c) return;
   enterArea(A); bus.emit('anim:open', c.id);
 }
+// "put on / take off with a gesture": glasses → pinch with both hands near the eyes, hats → both open hands above
+// the head, the rest → point at that spot; held 1 s, toggles the layer. The layer starts hidden (the gesture puts it on).
+function wearBind(L) {
+  const H = project.hand, cmd = 'layer:' + L.id, old = H.binds.find((b) => b.action && b.action.cmd === cmd && b.near);
+  if (old) { bus.emit('hand:edit-bind-id', old.id); return; }
+  const zone = zoneOfPt(L.face.pt), g = zone === 'eyes' ? ['pinch', 'both'] : zone === 'top' ? ['palm', 'both'] : ['point', 'any'];
+  H.binds.push({ id: uid(), on: true, gesture: g[0], hand: g[1], near: zone, hold: 1000, mode: 'once', every: 500, action: { type: 'app', cmd } });
+  if (!H.on) { H.on = true; applyHandCfg(); }
+  if (L.vis) setVis([L], false);
+  faceNow(); touch(); bus.emit('hand:binds'); bus.emit('hand:cfg'); renderProps();
+  toast(wearHint(g, zone), { label: T`ดู / แก้ท่า`, action: () => showTab('hand') });
+}
+const wearHint = (g, zone) => (g[0] === 'pinch' ? T`จีบนิ้วทั้งสองมือใกล้ตา ค้าง 1 วินาที = ใส่ · ทำอีกครั้ง = ถอด` : g[0] === 'palm' ? T`แบมือทั้งสองข้างบนหัว ค้าง 1 วินาที = ใส่ · ทำอีกครั้ง = ถอด` : T`ชี้นิ้ว${faceZoneName(zone)} ค้าง 1 วินาที = ใส่ · ทำอีกครั้ง = ถอด`);
 // add gesture commands straight away (e.g. swipe left / right for a slideshow)
 function quickBinds(list) {
   const H = project.hand; let n = 0;
@@ -601,7 +655,7 @@ function quickBinds(list) {
 const cmdName = (c) => (c.startsWith('layer-show:') ? T`โชว์` : c.startsWith('layer-hide:') ? T`ซ่อน` : c.startsWith('layer:') ? T`โชว์ / ซ่อน` : c.startsWith('slide-next:') ? T`สไลด์ถัดไป` : c.startsWith('slide-prev:') ? T`สไลด์ก่อนหน้า` : c);
 // several selected layers → one area around them (Ctrl+G)
 function groupToArea() {
-  const arr = layers(), G = sels().filter((l) => l.type !== 'handfx' && arr.includes(l)); if (!G.length) return;
+  const arr = layers(), G = sels().filter((l) => !FULLFX.has(l.type) && arr.includes(l)); if (!G.length) return;
   const b = groupBox(G), pad = 16, at = Math.max(...G.map((l) => arr.indexOf(l)));
   const A = newLayer('area', { ...AREA_DEF, kids: [], radius: 0, name: T`พื้นที่แอนิเมชัน`, x: b.cx, y: b.cy, w: b.w + pad * 2, h: b.h + pad * 2 });
   arr.splice(at + 1, 0, A);
@@ -610,7 +664,7 @@ function groupToArea() {
   toast(T`รวม ${G.length} เลเยอร์เป็นพื้นที่แอนิเมชันแล้ว`, { label: T`เข้าไปดู`, action: () => enterArea(A) });
 }
 function moveInto(list, A) {
-  list = list.filter((l) => l !== A && l.type !== 'handfx' && !(l.kids && allOf(l.kids).includes(A)));
+  list = list.filter((l) => l !== A && !FULLFX.has(l.type) && !(l.kids && allOf(l.kids).includes(A)));
   if (!list.length) return;
   for (const l of list) { const arr = listOf(l); arr.splice(arr.indexOf(l), 1); A.kids.push(l); }
   selId = null; selSet.clear(); commit(); refreshAll();
@@ -647,7 +701,7 @@ function leaveAreaAt(p) {
 }
 // the area's box hugs what is inside it (only the box changes — nothing inside moves)
 function fitAreaToKids(A) {
-  const ks = A.kids.filter((k) => k.vis && k.type !== 'handfx'); if (!ks.length) return;
+  const ks = A.kids.filter((k) => k.vis && !FULLFX.has(k.type)); if (!ks.length) return;
   syncAreas();
   let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
   for (const k of ks) { // corners of each one, in the area's own (turned) frame
@@ -682,7 +736,101 @@ function addHandText(text, extra = {}) {
 async function addHandSticker() {
   if (await addSticker({ hand: { ...HAND_DEF, on: true, pt: 'palm', scale: true, rot: true } })) { project.hand.on = true; bus.emit('hand:cfg'); }
 }
-const ADD = { camera: addCamera, screen: addScreen, image: addImages, video: addVideo, text: () => addText(), sticker: () => addSticker(), shape: addShape, frame: addFrame, handfx: addHandFx, area: addArea };
+/* ------------------------------------------------------------ face things */
+const faceHint = () => { if (!handSource()) toast(T`เพิ่มกล้องก่อน แล้วจะเริ่มจับใบหน้าทันที`); };
+// a picture file → stored once (library), returns its asset id
+async function pickAsset() {
+  const [f] = await pickFile($('file-image')); if (!f || !f.type.startsWith('image/')) return null;
+  const hit = f.name && lib().find((x) => x.sig === sigOf(f) && project.assets[x.asset]);
+  const id = hit ? hit.asset : uid(); if (!hit) project.assets[id] = await readDataUrl(f);
+  libAdd({ kind: 'image', asset: id, name: f.name.replace(/\.[^.]+$/, '').slice(0, 40) || T`รูปภาพ`, sig: sigOf(f) });
+  return id;
+}
+const imgSize = (url) => new Promise((res) => { const im = new Image(); im.onload = () => res([im.naturalWidth || 1, im.naturalHeight || 1]); im.onerror = () => res([1, 1]); im.src = url; });
+async function addFaceSticker(id) {
+  const it = FACE_PACK().find((x) => x[0] === id); if (!it) return;
+  const r = await packPng(id); if (!r) return;
+  const hit = lib().find((x) => x.sig === 'pack:' + id && project.assets[x.asset]);
+  const aid = hit ? hit.asset : uid(); if (!hit) project.assets[aid] = r.url;
+  libAdd({ kind: 'image', asset: aid, name: it[1], sig: 'pack:' + id });
+  const w = out().h * 0.3 * it[3];
+  addLayer(newLayer('image', { asset: aid, name: it[1], w, h: w * r.h / r.w, fresh: false, face: { ...LFACE_DEF, on: true, pt: it[2], ratio: it[3], dyK: it[4], fit: true } }));
+  faceNow(); faceHint();
+}
+async function addFaceImage() {
+  const aid = await pickAsset(); if (!aid) return;
+  const [nw, nh] = await imgSize(project.assets[aid]), w = out().h * 0.3, name = (lib().find((x) => x.asset === aid) || {}).name || T`รูปภาพ`;
+  addLayer(newLayer('image', { asset: aid, name, w, h: w * nh / nw, fresh: false, face: { ...LFACE_DEF, on: true, pt: 'eyes', ratio: 1, fit: true } }));
+  faceNow(); faceHint(); toast(T`เลือกจุดที่จะติดบนหน้าได้ในแผงด้านขวา`);
+}
+async function addFacePaint(id) {
+  const o = out(), p = PAINTS().find((x) => x[0] === id);
+  const extra = { paint: id, color: p ? p[2] : '#ffffff', who: '0', blend: id === 'blush' || id === 'lips' || id === 'freckles' ? 'multiply' : id === 'neon' ? 'screen' : 'source-over' };
+  if (id === 'custom') { const a = await pickAsset(); if (!a) return; extra.asset = a; }
+  addLayer(newLayer('facepaint', { name: p ? p[1] : T`ลายของฉัน`, x: o.w / 2, y: o.h / 2, w: o.w, h: o.h, fresh: false, ...extra }));
+  faceNow(); faceHint();
+}
+function addAvatar(kind) {
+  const a = AVATARS().find((x) => x[0] === kind) || AVATARS()[0], o = out(), sz = o.h * 0.85;
+  addLayer(newLayer('avatar', { name: a[1], x: o.w / 2, y: o.h - sz / 2, w: sz, h: sz, fresh: false, av: { ...AV_DEF, kind: a[0], color: a[2], color2: a[3], parts: {} } }));
+  faceNow();
+  const S = handSource();
+  if (!S) faceHint();
+  else if (a[0] === 'png') toast(T`ใส่รูปส่วนต่าง ๆ ของตัวละครในแผงด้านขวา`);
+  else if (S.vis && S.type === 'camera') toast(T`ซ่อนภาพกล้องจริงไหม? (ยังจับหน้าต่อได้)`, { label: T`ซ่อนกล้อง`, action: () => setVis([S], false) });
+}
+function ensureFaces(n) { const c = project.face; if (c.faces < n) { c.faces = Math.min(4, n); setFaceOptions(c); } }
+function faceStatusText() {
+  if (!handSource()) return T`ยังไม่มีกล้องในซีนนี้ — เพิ่มกล้องก่อน`;
+  if (face.state === 'failed') return T`เปิด AI จับใบหน้าไม่สำเร็จ: ${face.err}`;
+  if (face.state !== 'ready') return T`กำลังเปิด AI จับใบหน้า…`;
+  return sceneFaces.length ? T`เห็น ${sceneFaces.length} หน้า · ${face.fps} ครั้ง/วินาที` : T`ยังไม่เห็นหน้า — มองเข้ากล้องตรง ๆ`;
+}
+function faceStatusLong() {
+  if (!faceUse) return T`ยังไม่ได้ใช้ — เปิดเองเมื่อในซีนมีของติดหน้า ลายบนหน้า ตัวละคร VTuber หรือคำสั่งที่ใช้สีหน้า`;
+  if (face.state !== 'ready' || !handSource()) return faceStatusText();
+  return `${face.delegate} · ${face.fps} ${T`ครั้ง/วินาที`} · ${Math.round(face.ms)} ms · ` + (sceneFaces.length ? T`เห็น ${sceneFaces.length} หน้า` : T`ยังไม่เห็นหน้า`);
+}
+const applyFaceCfg = () => { setFaceOptions(project.face); faceNow(); };
+const setFacePreview = (on) => { facePreview = !!on; faceNow(); };
+setInterval(() => { for (const e of document.querySelectorAll('[data-facest]')) e.textContent = faceStatusText(); }, 500);
+function cycleFace(dir) {
+  const list = allLayers().filter((l) => l.face && l.face.on && l.face.cycle); if (!list.length) return;
+  const n = list.length, cur = list.findIndex((l) => l.vis), next = list[((cur < 0 ? (dir > 0 ? -1 : 0) : cur) + dir + n) % n];
+  for (const l of list) l.vis = l === next;
+  commit(); renderLayers();
+}
+// the dock's face button: stickers, face paint, VTuber characters — with live previews of the characters
+async function openFacePicker() {
+  facePreview = true; faceNow(); // the face model starts loading while the user picks
+  let raf = 0;
+  const pick = await htmlBox(`<h3>${T`ใบหน้า — ติดบนหน้า · ลายบนหน้า · VTuber`}</h3>
+    <div class="fp-status" data-facest>${esc(faceStatusText())}</div>
+    <h5 class="fp-h">${T`ติดบนหน้า`}</h5>
+    <div class="fp-grid">${FACE_PACK().map(([id, name]) => `<button class="fp-item" data-k="pack:${id}" title="${esc(name)}"><img src="${packThumb(id)}" alt=""><span>${esc(name)}</span></button>`).join('')}
+      <button class="fp-item" data-k="own"><b class="fp-plus">+</b><span>${T`รูปของฉัน`}</span></button></div>
+    <h5 class="fp-h">${T`ลายบนหน้า`}</h5>
+    <div class="fp-grid">${PAINTS().map(([id, name, col]) => `<button class="fp-item" data-k="paint:${id}"><img class="fp-face" src="${paintThumb(id, col)}" alt=""><span>${esc(name)}</span></button>`).join('')}
+      <button class="fp-item" data-k="paint:custom"><b class="fp-plus">+</b><span>${T`ลายของฉัน`}</span></button></div>
+    <h5 class="fp-h">${T`ตัวละคร VTuber`}</h5>
+    <div class="fp-grid av">${AVATARS().map(([id, name]) => `<button class="fp-item" data-k="av:${id}">${id === 'png' ? '<b class="fp-plus big">+</b>' : `<canvas width="120" height="120" data-avp="${id}"></canvas>`}<span>${esc(name)}</span></button>`).join('')}</div>
+    <div class="modal-btns"><button class="pill-btn" data-x>${T`ปิด`}</button></div>`,
+  (m, close) => {
+    m.querySelector('.modal-card').classList.add('face-pick');
+    m.querySelector('[data-x]').onclick = () => close(null);
+    m.querySelectorAll('[data-k]').forEach((b) => { b.onclick = () => close(b.dataset.k); });
+    const cvs = [...m.querySelectorAll('[data-avp]')].map((c) => ({ c, g: c.getContext('2d'), L: { id: 'pv:' + c.dataset.avp, w: 120, h: 120, av: { ...AV_DEF, kind: c.dataset.avp, ...(() => { const a = AVATARS().find((x) => x[0] === c.dataset.avp); return { color: a[2], color2: a[3] }; })(), follow: 0, parts: {} } } }));
+    const loop = () => { if (!m.isConnected) return; const now = performance.now(); for (const { c, g, L } of cvs) { g.clearRect(0, 0, c.width, c.height); g.save(); g.translate(60, 62); drawAvatar(g, L, sceneFaces[0] || null, now, assetImg); g.restore(); } raf = requestAnimationFrame(loop); };
+    loop();
+  });
+  cancelAnimationFrame(raf); facePreview = false; faceNow();
+  if (!pick) return;
+  if (pick.startsWith('pack:')) addFaceSticker(pick.slice(5));
+  else if (pick === 'own') addFaceImage();
+  else if (pick.startsWith('paint:')) addFacePaint(pick.slice(6));
+  else if (pick.startsWith('av:')) addAvatar(pick.slice(3));
+}
+const ADD = { face: openFacePicker, camera: addCamera, screen: addScreen, image: addImages, video: addVideo, text: () => addText(), sticker: () => addSticker(), shape: addShape, frame: addFrame, handfx: addHandFx, area: addArea };
 
 /* ------------------------------------------------------------ hand tracking */
 // which layer the tracker watches: the chosen one, else the first camera (then video / screen / image) in this scene
@@ -694,15 +842,41 @@ function handSource() {
 }
 const HS = [], hsPool = new Map(); // hands of this frame in scene pixels: { id, tr, g, pin, side, p[42], palm, size, ang }
 const hp = new Map();              // layer id → live pose of a hand-attached layer
-function trackHands(now) {
+// does anything in this scene read the face? (checked every 20 frames — layers, paints, avatars, drives, commands)
+let faceUseN = -99, faceUse = false, facePreview = false;
+function faceUsed() {
+  if (frameNo - faceUseN < 20) return faceUse;
+  faceUseN = frameNo; setFaceOptions(project.face);
+  const ls = allLayers(), fg = (g) => String(g || '').startsWith('f:');
+  faceUse = facePreview || ls.some((l) => (l.face && l.face.on) || l.type === 'facepaint' || l.type === 'avatar' || (l.hand && l.hand.on && fg(l.hand.gest)))
+    || (scene().clips || []).some((c) => c.drive && (isFaceDrive(c.drive.src) || fg(c.drive.gest)))
+    || project.hand.binds.some((b) => b.on && (fg(b.gesture) || (b.near && project.hand.on)));
+  return faceUse;
+}
+const faceNow = () => { faceUseN = -99; };
+// one camera picture → hand model and face model (shared AI worker, ai.js); then both are placed on the stage
+function trackAi(now) {
   HS.length = 0;
-  if (!project.hand.on) { if (hands.state !== 'off') stopHands(); return; }
-  pruneHands(now);
+  const wantH = project.hand.on, wantF = faceUsed();
+  if (!wantH && hands.state !== 'off') stopHands();
+  if (!wantF) sceneFaces.length = 0;
+  if (frameNo % 120 === 0) pruneAi(now, ['face', 'seg']); // models nobody used for 30 s are closed (memory on weak PCs)
+  if (!wantH && !wantF) return;
+  if (wantH) pruneHands(now);
   const S = handSource(), r = S && rt.get(S.id);
-  if (!S || !r || !r.el || !natural(S)) return;
-  feedHands(r.el, now);
-  poseHands(now);
+  if (!S || !r || !r.el || !natural(S)) { sceneFaces.length = 0; return; }
+  const hOk = wantH && handsReady(), fOk = wantF && facesReady();
+  const vw = r.el.videoWidth || r.el.naturalWidth || 0, vh = r.el.videoHeight || r.el.naturalHeight || 0;
+  if (vw && vh) hands.ar = face.ar = vw / vh;
+  if (hOk || fOk) feedAi('track', r.el, now, { hand: hOk, face: fOk }, { maxW: 640, gap: handGap() });
   const c = S.crop, cw = 1 - c.l - c.r, ch = 1 - c.t - c.b, a = S.rot * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a), fh = S.flipH ? -1 : 1, fv = S.flipV ? -1 : 1;
+  const map = (x, y) => { const u = ((x - c.l) / cw - 0.5) * S.w * fh, v = ((y - c.t) / ch - 0.5) * S.h * fv; return [S.x + u * ca - v * sa, S.y + u * sa + v * ca]; };
+  if (wantF) {
+    const o = out();
+    for (const F of placeFaces(now, map, S.flipH, S.flipV)) { F.nx = (F.cx / o.w - 0.5) * 2; F.ny = (F.cy / o.h - 0.5) * 2; }
+  }
+  if (!wantH) return;
+  poseHands(now);
   for (const tr of hands.tracks) {
     let h = hsPool.get(tr.id); if (!h) { h = { id: tr.id, tr, p: new Float32Array(42), palm: [0, 0], size: 1, ang: 0 }; hsPool.set(tr.id, h); }
     const p = h.p, q = tr.p;
@@ -718,7 +892,8 @@ function trackHands(now) {
 const sceneHand = (side) => { let best = null; for (const h of HS) { if ((side === 'left' && h.side !== 'L') || (side === 'right' && h.side !== 'R')) continue; if (!best || h.tr.born < best.tr.born) best = h; } return best; };
 // live pose of a layer that follows the hand (null when the layer is not attached)
 function handPose(L) {
-  const A = L.hand; if (!A || !A.on || L.type === 'handfx') return null;
+  if (L.face && L.face.on && !FULLFX.has(L.type) && L.type !== 'area' && L.type !== 'avatar') return facePose(L, L.face.who === 'all' ? 0 : +L.face.who || 0);
+  const A = L.hand; if (!A || !A.on || FULLFX.has(L.type)) return null;
   let s = hp.get(L.id); if (!s) { s = { a: 0, x: L.x, y: L.y, rot: 0, k: 1, ax: L.x, ay: L.y, size: 0, live: false, f: -1 }; hp.set(L.id, s); }
   if (s.f === frameNo) return s;
   s.f = frameNo;
@@ -741,7 +916,7 @@ function handPose(L) {
   // "works only with this pose": while the hand is not making it, the layer behaves exactly as when the hand is not
   // seen — hide, stay where it is, or go back home (the "when the hand is not seen" choice)
   const pairG = hands.pair ? hands.pair.g : '';
-  const follow = ok && (!A.gest || (A.gest.startsWith('pair:') ? pairG === A.gest : gest === A.gest));
+  const follow = ok && (!A.gest || (A.gest.startsWith('f:') ? faceExprSince(A.gest) > 0 : A.gest.startsWith('pair:') ? pairG === A.gest : gest === A.gest));
   if (follow) {
     const th = A.rot ? ang : 0, k = A.scale ? Math.max(0.05, size / (A.ref || (A.pt === 'between' ? o.w * 0.4 : o.h * 0.22))) : 1;
     // smoothness: the attached layer eases towards the hand (time-based, so it feels the same at any frame rate).
@@ -757,11 +932,40 @@ function handPose(L) {
   s.a += (want - s.a) * 0.32; if (Math.abs(want - s.a) < 0.01) s.a = want;
   return s;
 }
+// live pose of a layer that rides face number `idx` (glasses, hats, …). `key` keeps a separate smoothing state per
+// face when one layer is drawn on every face. First sight of a face (or "fit to face"): the layer takes the size that
+// suits its spot (FACE_PTS share of the face width) and remembers that face width as its 100 %.
+function facePose(L, idx = 0, key = L.id) {
+  const A = L.face;
+  let s = hp.get(key); if (!s) { s = { a: 0, x: L.x, y: L.y, rot: 0, k: 1, sx: 1, sy: 1, ax: L.x, ay: L.y, size: 0, live: false, f: -1 }; hp.set(key, s); }
+  if (s.f === frameNo) return s;
+  s.f = frameNo;
+  const F = sceneFaces[idx], follow = !!F && (!A.expr || faceExprSince(A.expr) > 0);
+  const t = performance.now(), dt = Math.min(0.1, s.t ? (t - s.t) / 1000 : 0); s.t = t;
+  if (follow) {
+    if (A.fit || !A.ref) {
+      if (A.fit) { const ar = L.h / (L.w || 1), w = Math.max(8, F.w * (A.ratio || faceFit(A.pt))); L.w = w; L.h = w * ar; A.dx = 0; A.dy = (A.dyK || 0) * L.h; A.fit = false; queueSave(); if (L.id === selId) setTimeout(renderProps, 0); }
+      A.ref = F.w;
+    }
+    const [ax, ay] = faceAnchor(F, A.pt);
+    const th = A.rot ? F.roll : 0, k = A.scale ? Math.max(0.05, F.w / A.ref) : 1;
+    const sx = A.turn ? Math.max(0.35, Math.cos(F.ryaw)) : 1, sy = A.turn ? Math.max(0.55, Math.cos(F.rpitch)) : 1;
+    const sm = (A.smooth ?? 10) / 100, e = s.a < 0.05 || sm <= 0 ? 1 : 1 - Math.exp(-dt / (0.015 + sm * sm * 0.45));
+    let dr = th - s.rot; dr = Math.atan2(Math.sin(dr), Math.cos(dr));
+    s.rot += dr * e; s.k += (k - s.k) * e; s.ax += (ax - s.ax) * e; s.ay += (ay - s.ay) * e; s.sx += (sx - s.sx) * e; s.sy += (sy - s.sy) * e; s.size = F.w;
+    const cs = Math.cos(s.rot), sn = Math.sin(s.rot), ox = A.dx * s.sx, oy = A.dy * s.sy;
+    s.x = s.ax + (ox * cs - oy * sn) * s.k; s.y = s.ay + (ox * sn + oy * cs) * s.k;
+  } else if (A.lost === 'home') { s.x += (L.x - s.x) * 0.18; s.y += (L.y - s.y) * 0.18; s.rot *= 0.82; s.k += (1 - s.k) * 0.18; s.sx += (1 - s.sx) * 0.18; s.sy += (1 - s.sy) * 0.18; }
+  s.live = follow;
+  const want = follow || A.lost !== 'hide' ? 1 : 0;
+  s.a += (want - s.a) * 0.32; if (Math.abs(want - s.a) < 0.01) s.a = want;
+  return s;
+}
 // the box a layer really occupies on stage (follows the hand when attached)
 function E(L0) {
   const L = AV(L0), s = handPose(L), kx = kxOf(L), ky = kyOf(L);
   let r;
-  if (s) r = { x: s.x, y: s.y, w: L.w * s.k * kx, h: L.h * s.k * ky, rot: L.rot + s.rot * 180 / Math.PI, k: s.k, s, kx, ky };
+  if (s) r = { x: s.x, y: s.y, w: L.w * s.k * (s.sx || 1) * kx, h: L.h * s.k * (s.sy || 1) * ky, rot: L.rot + s.rot * 180 / Math.PI, k: s.k, s, kx, ky };
   else if (L === L0 && kx === 1 && ky === 1) r = L;
   else r = { x: L.x, y: L.y, w: L.w * kx, h: L.h * ky, rot: L.rot, k: 1, kx, ky };
   return L0._area ? areaMap(L0._area, r) : r;
@@ -795,8 +999,8 @@ function areaUnmap(A0, x, y) { // a point on stage → the area's resting place
 }
 // move a layer so that its centre lands on (x, y); for a layer riding the hand this changes its offset from the hand
 function setCenter(L, x, y) {
-  const s = L.hand && L.hand.on ? hp.get(L.id) : null;
-  if (s && s.live) { const cs = Math.cos(-s.rot), sn = Math.sin(-s.rot), dx = (x - s.ax) / s.k, dy = (y - s.ay) / s.k; L.hand.dx = dx * cs - dy * sn; L.hand.dy = dx * sn + dy * cs; s.x = x; s.y = y; }
+  const A = L.face && L.face.on && L.type !== 'area' && L.type !== 'avatar' ? L.face : L.hand && L.hand.on ? L.hand : null, s = A ? hp.get(L.id) : null;
+  if (s && s.live) { const cs = Math.cos(-s.rot), sn = Math.sin(-s.rot), dx = (x - s.ax) / s.k, dy = (y - s.ay) / s.k; A.dx = (dx * cs - dy * sn) / (s.sx || 1); A.dy = (dx * sn + dy * cs) / (s.sy || 1); s.x = x; s.y = y; }
   else {
     if (L._area) ({ x, y } = areaUnmap(L._area, x, y));
     L.x = x; L.y = y; if (s) { s.x = x; s.y = y; }
@@ -830,6 +1034,27 @@ function drawMouseMeter(o) {
   octx.lineWidth = 2; octx.strokeStyle = '#ffd36b'; octx.beginPath(); octx.moveTo(X(mv.press), y - 3); octx.lineTo(X(mv.press), y + H8 + 3); octx.stroke();
   octx.setLineDash([3, 3]); octx.beginPath(); octx.moveTo(X(mv.release), y - 3); octx.lineTo(X(mv.release), y + H8 + 3); octx.stroke(); octx.setLineDash([]);
 }
+// preview-only face mesh: the outline the tracker sees + the face gestures showing now (not sent to the camera)
+function drawFaceMesh(o) {
+  const fs = Math.max(14, o.h * 0.024);
+  octx.lineCap = 'round'; octx.lineJoin = 'round';
+  for (const F of sceneFaces) {
+    const p = F.p, lw = Math.max(1.2, F.w * 0.006);
+    octx.beginPath();
+    for (const L of FACE_LINES.loops) { octx.moveTo(p[L[0] * 2], p[L[0] * 2 + 1]); for (let i = 1; i < L.length; i++) octx.lineTo(p[L[i] * 2], p[L[i] * 2 + 1]); octx.closePath(); }
+    for (const L of FACE_LINES.lines) { octx.moveTo(p[L[0] * 2], p[L[0] * 2 + 1]); for (let i = 1; i < L.length; i++) octx.lineTo(p[L[i] * 2], p[L[i] * 2 + 1]); }
+    octx.lineWidth = lw * 3; octx.strokeStyle = 'rgba(110,243,255,.35)'; octx.stroke();
+    octx.lineWidth = lw; octx.strokeStyle = 'rgba(255,255,255,.95)'; octx.stroke();
+    // dots: every 6th point (light) + the irises; an eye that counts as closed turns pink
+    octx.fillStyle = 'rgba(255,255,255,.55)'; octx.beginPath(); for (let i = 0; i < 468; i += 6) { octx.moveTo(p[i * 2] + lw, p[i * 2 + 1]); octx.arc(p[i * 2], p[i * 2 + 1], lw, 0, 6.2832); } octx.fill();
+    for (const [i, shut] of [[468, F.flipH ? F.eyeR : F.eyeL], [473, F.flipH ? F.eyeL : F.eyeR]]) { octx.fillStyle = shut > 0.5 ? '#ff6b9a' : '#6ef3ff'; octx.beginPath(); octx.arc(p[i * 2], p[i * 2 + 1], Math.max(3, F.w * 0.025), 0, 6.2832); octx.fill(); }
+    const on = [...F.tr.exOn].map(faceExprName).filter(Boolean), txt = on.length ? on.join(' · ') : T`หน้าปกติ`;
+    octx.font = `600 ${fs}px "IBM Plex Sans Thai", "Segoe UI Emoji", sans-serif`; octx.textAlign = 'center'; octx.textBaseline = 'middle';
+    const w = octx.measureText(txt).width + fs * 1.3, x = p[152 * 2], y = Math.min(o.h - fs, p[152 * 2 + 1] + fs * 1.4);
+    octx.fillStyle = 'rgba(40,150,170,.88)'; octx.beginPath(); octx.roundRect(x - w / 2, y - fs * 0.85, w, fs * 1.7, fs * 0.85); octx.fill();
+    octx.fillStyle = '#fff'; octx.fillText(txt, x, y);
+  }
+}
 // preview-only overlay (never sent to the virtual camera): skeleton, gesture name, hold progress, mouse zone
 const ov = $('hand-ov'), octx = ov.getContext('2d');
 let ovDirty = false;
@@ -837,6 +1062,7 @@ function drawOverlay() {
   const o = out(), H = project.hand;
   if (ov.width !== o.w || ov.height !== o.h) { ov.width = o.w; ov.height = o.h; }
   if (ovDirty) { octx.clearRect(0, 0, o.w, o.h); ovDirty = false; }
+  if (project.face.mesh && sceneFaces.length) { drawFaceMesh(o); ovDirty = true; }
   if (!H.on) return;
   const S = handSource();
   if (hands.zone && S) { // the part of the camera picture that maps onto the whole screen in mouse mode
@@ -851,6 +1077,15 @@ function drawOverlay() {
   ovDirty = true;
   octx.lineCap = 'round';
   drawMouseMeter(o);
+  const fhold = hands.faceHold, F0 = fhold && sceneFaces[0];
+  if (F0) { // a gesture held at the face: a ring fills up around that spot (eyes, mouth …)
+    const r = Math.max(14, F0.w * 0.2);
+    for (const i of ZONE_RING[fhold.zone] || [1]) {
+      const x = F0.p[i * 2], y = F0.p[i * 2 + 1];
+      octx.lineWidth = Math.max(4, r * 0.16); octx.strokeStyle = 'rgba(255,255,255,.35)'; octx.beginPath(); octx.arc(x, y, r, 0, 6.2832); octx.stroke();
+      octx.strokeStyle = '#ff9ec7'; octx.beginPath(); octx.arc(x, y, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * fhold.k); octx.stroke();
+    }
+  }
   if (!H.overlay) return;
   for (const h of HS) {
     const p = h.p, col = h.side === 'R' ? '124,140,255' : '255,158,199';
@@ -918,10 +1153,29 @@ function textMetrics(L) {
 
 function drawLayer(L, now) {
   if (L.type === 'handfx') { if (!L.fx) L.fx = { ...FX_DEFAULT }; drawHandFx(ctx, L, HS, now, out(), hands.pair); return; }
-  const hs = handPose(L);
+  if (L.type === 'facepaint') { drawPaint(L); return; }
+  // "on every face": the same layer once per face, each with its own pose
+  if (L.face && L.face.on && L.face.who === 'all' && L.type !== 'area' && L.type !== 'avatar') { const n = Math.max(1, sceneFaces.length); for (let i = 0; i < n; i++) drawLayerAt(L, now, facePose(L, i, i ? L.id + ':' + i : L.id)); return; }
+  drawLayerAt(L, now, handPose(L));
+}
+function drawPaint(L) {
+  if (!L.paint) L.paint = 'blush';
+  const src = paintSource(L, project.assets, (X) => assetImg(X.asset));
+  ctx.save(); ctx.globalAlpha = L.op * alphaK; ctx.globalCompositeOperation = L.blend || 'source-over';
+  try { drawFacePaint(ctx, L, sceneFaces, out(), rs, src); } finally { ctx.restore(); }
+}
+// pictures kept in project.assets as Image elements (avatar parts, own face paint)
+const imgCache = new Map();
+function assetImg(id) {
+  if (!id || !project.assets[id]) return null;
+  let im = imgCache.get(id);
+  if (!im || im._src !== project.assets[id]) { im = new Image(); im._src = project.assets[id]; im.src = im._src; imgCache.set(id, im); if (imgCache.size > 60) imgCache.delete(imgCache.keys().next().value); }
+  return im.complete && im.naturalWidth ? im : null;
+}
+function drawLayerAt(L, now, hs) {
   if (hs && hs.a <= 0.01) return;
   ctx.save();
-  if (hs) { ctx.translate(hs.x, hs.y); ctx.rotate(L.rot * Math.PI / 180 + hs.rot); ctx.scale(hs.k, hs.k); ctx.globalAlpha = L.op * hs.a * alphaK; }
+  if (hs) { ctx.translate(hs.x, hs.y); ctx.rotate(L.rot * Math.PI / 180 + hs.rot); ctx.scale(hs.k * (hs.sx || 1), hs.k * (hs.sy || 1)); ctx.globalAlpha = L.op * hs.a * alphaK; }
   else { ctx.translate(L.x, L.y); ctx.rotate(L.rot * Math.PI / 180); ctx.globalAlpha = L.op * alphaK; }
   const kx = kxOf(L), ky = kyOf(L);
   if (kx !== 1 || ky !== 1) { if (Math.abs(kx) < 1e-4 || Math.abs(ky) < 1e-4) { ctx.restore(); return; } ctx.scale(kx, ky); }
@@ -944,6 +1198,9 @@ function drawLayer(L, now) {
     if (L.shadow) setShadow(L);
     if (L.grad) { const g = ctx.createLinearGradient(-L.w / 2, -L.h / 2, L.w / 2, L.h / 2); g.addColorStop(0, L.fill); g.addColorStop(1, L.fill2); ctx.fillStyle = g; } else ctx.fillStyle = L.fill;
     shapePath(L, L.w, L.h); ctx.fill(); noShadow();
+  } else if (L.type === 'avatar') {
+    const A = L.av || (L.av = { ...AV_DEF, parts: {} });
+    drawAvatar(ctx, L, sceneFaces[+A.who || 0] || null, now, assetImg);
   } else if (L.type === 'frame') {
     if (L.shadow) setShadow(L);
   } else {
@@ -965,10 +1222,10 @@ function drawLayer(L, now) {
           let hasMask = false;
           if (L.ai.mode !== 'off') {
             if (segState() === 'idle') loadSegmenter().then(() => { if (segState() === 'failed') toast(T`โหลดโมเดล AI ไม่สำเร็จ`, { kind: 'err' }); renderProps(); });
-            const every = segEvery(liveFps(out().fps));
-            if (segState() === 'ready' && L.type !== 'image' ? (frameNo + (r.seed ??= Math.floor(Math.random() * every))) % every === 0 || !r.mask : !r.mask) {
-              const t0 = performance.now(), m = segment(r.el, r.mask); ema('seg', performance.now() - t0); if (m) { r.mask = m; r.proc.setMask(m.bytes, m.w, m.h); }
-            }
+            else segKeep();
+            const fps = liveFps(out().fps), every = segEvery(fps); // the mask is made in the AI worker; the newest one is used when it arrives
+            if (segState() === 'ready' && (L.type !== 'image' || !r.mask)) segFeed(L.id, r.el, now, every * 1000 / fps);
+            const m = segTake(L.id); if (m) { r.mask = m; r.proc.setMask(m.bytes, m.w, m.h); if (m.n > 2) ema('seg', m.ms || 0); }
             hasMask = !!r.mask;
           }
           src = r.proc.render(r.el, n.w, n.h, L, hasMask) || r.el;
@@ -1026,7 +1283,7 @@ function draw() {
   ctx.fillStyle = '#05060f'; ctx.fillRect(0, 0, o.w, o.h);
   frameNo++;
   const now = performance.now();
-  try { trackHands(now); } catch (err) { console.error('hands', err); }
+  try { trackAi(now); } catch (err) { console.error('tracking', err); }
   bus.emit('hand:tick', now);
   try { animFrame(scene(), now, animEnv); } catch (err) { console.error('anim', err); }
   alphaK = 1; linkKids(root()); syncAreas(); drawList(root(), now);
@@ -1053,7 +1310,7 @@ function resizeOut(w, h) {
   for (const sc of project.scenes) {
     const clips = sc.clips || [];
     for (const L of sc.layers) {
-      if (L.type === 'handfx') { L.x = w / 2; L.y = h / 2; L.w = w; L.h = h; continue; }
+      if (FULLFX.has(L.type)) { L.x = w / 2; L.y = h / 2; L.w = w; L.h = h; continue; }
       const full = fills(L), fw = full ? kx : k, fh = full ? ky : k, f = L.type === 'area' ? (setF(L), L._f) : null;
       for (const c of clips) for (const t of c.tracks) if (t.layer === L.id) {
         const m = t.prop === 'x' ? kx : t.prop === 'y' ? ky : t.prop === 'w' ? fw : t.prop === 'h' ? fh : t.prop === 'radius' || t.prop === 'border' ? k : 1;
@@ -1130,7 +1387,7 @@ function placeFocus() {
 let selBoxN = -1;
 function placeGizmo() {
   placeFocus();
-  const S = sels().filter((l) => l.type !== 'handfx' && AV(l).vis);
+  const S = sels().filter((l) => !FULLFX.has(l.type) && AV(l).vis);
   if (S.length > 1) { // several layers: one box around all of them, a thin outline on each
     const b = groupBox(S), w = b.w * view, h = b.h * view;
     gizmo.classList.remove('hidden', 'crop'); gizmo.classList.add('multi');
@@ -1144,7 +1401,7 @@ function placeGizmo() {
   gizmo.classList.remove('multi');
   if (selBoxN) { selBoxN = 0; selBoxes.innerHTML = ''; }
   const L = sel();
-  if (!L || !AV(L).vis || L.type === 'handfx') { gizmo.classList.add('hidden'); return; }
+  if (!L || !AV(L).vis || FULLFX.has(L.type)) { gizmo.classList.add('hidden'); return; }
   const e = E(L);
   if (e.s && e.s.a < 0.5) { gizmo.classList.add('hidden'); return; }
   gizmo.classList.remove('hidden');
@@ -1163,7 +1420,7 @@ const toLocal = (L, p) => { const a = -L.rot * Math.PI / 180, dx = p.x - L.x, dy
 function hitAll(p) {
   const a = layers(), r = [], min = 12 / view;
   for (let i = a.length - 1; i >= 0; i--) {
-    const L = a[i]; if (!AV(L).vis || L.lock || L.type === 'handfx') continue;
+    const L = a[i]; if (!AV(L).vis || L.lock || FULLFX.has(L.type)) continue;
     const e = E(L); if (e.s && e.s.a < 0.5) continue;
     const q = toLocal(e, p), hw = Math.max(e.w / 2, min), hh = Math.max(e.h / 2, min);
     if (Math.abs(q.x) > hw || Math.abs(q.y) > hh) continue;
@@ -1219,7 +1476,7 @@ const multi = (e) => e.ctrlKey || e.metaKey;
 // (animation mode: begin() first stands each layer where the animation shows it — otherwise the sizes / turns
 // remembered here are the un-animated ones and the group jumps or warps on the first move)
 function groupItems(list) {
-  list = list.filter((l) => !l.lock && l.type !== 'handfx');
+  list = list.filter((l) => !l.lock && !FULLFX.has(l.type));
   if (hooks.begin) for (const L of list) hooks.begin(L);
   return list.map((L) => { const e = E(L); return { L, x: e.x, y: e.y, w: L.w, h: L.h, rot: L.rot, kx: e.w / Math.max(1e-6, L.w), ky: e.h / Math.max(1e-6, L.h) }; });
 }
@@ -1229,7 +1486,7 @@ box.addEventListener('pointerdown', (e) => {
   const p = toScene(e), hEl = e.target.closest('[data-h]');
   if (!hEl && scope && leaveAreaAt(p)) { /* clicked outside the area being edited: back out, then this click works out there */ }
   let L = sel();
-  const S = sels().filter((l) => l.type !== 'handfx');
+  const S = sels().filter((l) => !FULLFX.has(l.type));
   if (hEl && S.length > 1) { // handles of the group box
     const items = groupItems(S), b = groupBox(S); if (!items.length) return;
     const h = hEl.dataset.h;
@@ -1246,7 +1503,7 @@ box.addEventListener('pointerdown', (e) => {
     } else if (!H) { select(null); op = { kind: 'marquee', r: { x0: p.x, y0: p.y, x1: p.x, y1: p.y }, add: false }; box.setPointerCapture(e.pointerId); e.preventDefault(); return; }
     else if (!selSet.has(H.id)) select(H.id);
     else if (selId !== H.id) { selId = H.id; renderLayers(); renderProps(); bus.emit('select', selId); }
-    const G = sels().filter((l) => l.type !== 'handfx');
+    const G = sels().filter((l) => !FULLFX.has(l.type));
     if (G.length > 1) { // drag the whole group
       const items = groupItems(G); if (!items.length) return;
       op = { kind: 'gmove', items, p0: p, b: groupBox(G), moved: false, sx: e0x, sy: e0y, swap: pendingSwap };
@@ -1355,7 +1612,7 @@ const stageHint = document.createElement('div'); stageHint.id = 'stage-hint'; st
 function stageAreaHint(e, p) {
   const moving = op.items ? op.items.map((it) => it.L) : [op.L];
   const A = areaAt(p, moving);
-  op.into = A && e.ctrlKey && !moving.some((x) => x.type === 'handfx') ? A : null;
+  op.into = A && e.ctrlKey && !moving.some((x) => FULLFX.has(x.type)) ? A : null;
   showStageDrop(op.into);
   stageHint.classList.toggle('hidden', !A); stageHint.classList.toggle('ok', !!op.into);
   if (A) {
@@ -1379,7 +1636,7 @@ const endOp = () => {
     showMarquee(null);
     const r = o.r, x0 = Math.min(r.x0, r.x1), x1 = Math.max(r.x0, r.x1), y0 = Math.min(r.y0, r.y1), y1 = Math.max(r.y0, r.y1);
     if (x1 - x0 < 3 && y1 - y0 < 3) return;
-    const got = layers().filter((l) => { if (!AV(l).vis || l.lock || l.type === 'handfx') return false; const b = groupBox([l]); return b.x1 >= x0 && b.x0 <= x1 && b.y1 >= y0 && b.y0 <= y1; }).map((l) => l.id);
+    const got = layers().filter((l) => { if (!AV(l).vis || l.lock || FULLFX.has(l.type)) return false; const b = groupBox([l]); return b.x1 >= x0 && b.x0 <= x1 && b.y1 >= y0 && b.y0 <= y1; }).map((l) => l.id);
     selectMany(o.add ? [...new Set([...sels().map((l) => l.id), ...got])] : got);
     return;
   }
@@ -1400,9 +1657,9 @@ box.addEventListener('dblclick', async (e) => {
   else if (MEDIA.has(L.type)) { cropMode = !cropMode; renderProps(); toast(cropMode ? T`โหมดครอป: ลากจุดที่ขอบเพื่อตัดภาพ` : T`ออกจากโหมดครอปแล้ว`); }
 });
 box.addEventListener('wheel', (e) => {
-  const L = sel(); if (!L || L.lock || L.type === 'handfx') return;
+  const L = sel(); if (!L || L.lock || FULLFX.has(L.type)) return;
   e.preventDefault();
-  const k = Math.exp(-e.deltaY * 0.0012), G = sels().filter((l) => !l.lock && l.type !== 'handfx');
+  const k = Math.exp(-e.deltaY * 0.0012), G = sels().filter((l) => !l.lock && !FULLFX.has(l.type));
   if (G.length > 1) { // the whole group grows / shrinks around its centre
     const b = groupBox(G);
     if (hooks.begin && !box._wg) { box._wg = G; for (const l of G) hooks.begin(l); }
@@ -1422,7 +1679,7 @@ box.addEventListener('contextmenu', (e) => {
   ctxMenu(e.clientX, e.clientY, [
     layerClip && { icon: 'paste', label: T`วางที่นี่ (Ctrl+V)`, run: () => { if (pasteLayers()) { const G = sels(), b = groupBox(G); for (const x of G) setCenter(x, E(x).x + p.x - b.cx, E(x).y + p.y - b.cy); commit(); } } },
     { icon: 'area', label: T`สร้างพื้นที่แอนิเมชันตรงนี้`, run: () => { addArea(); const A = sel(); if (A) { setCenter(A, p.x, p.y); commit(); } } },
-    layers().length && { icon: 'layers', label: T`เลือกทั้งหมด (Ctrl+A)`, run: () => selectMany(layers().filter((l) => l.type !== 'handfx').map((l) => l.id)) },
+    layers().length && { icon: 'layers', label: T`เลือกทั้งหมด (Ctrl+A)`, run: () => selectMany(layers().filter((l) => !FULLFX.has(l.type)).map((l) => l.id)) },
     hidden.length && { icon: 'eye', label: T`แสดงทั้งหมด (${hidden.length})`, run: () => setVis(hidden, true) },
     curArea() && { icon: 'arrowl', label: T`ออกจากพื้นที่`, run: () => exitArea() },
   ].filter(Boolean), T`เวที`);
@@ -1432,7 +1689,7 @@ function setVis(list, v) { list = list.filter((l) => l.vis !== v); if (!list.len
 function setLock(list, v) { list.forEach((l) => { l.lock = v; }); commit(); renderLayers(); }
 // solo: only this layer (or the selection) stays visible in its list · solo again = everything back
 function solo(keep) {
-  const arr = listOf(keep[0]), others = arr.filter((l) => !keep.includes(l) && l.type !== 'handfx');
+  const arr = listOf(keep[0]), others = arr.filter((l) => !keep.includes(l) && !FULLFX.has(l.type));
   if (keep.every((l) => l.vis) && others.length && others.every((l) => !l.vis)) { setVis(others, true); toast(T`แสดงทุกเลเยอร์กลับมาแล้ว`); return; }
   keep.forEach((l) => { l.vis = true; }); others.forEach((l) => { l.vis = false; }); commit(); refreshAll();
   toast(keep.length > 1 ? T`แสดงเฉพาะ ${keep.length} เลเยอร์ที่เลือก` : T`แสดงเฉพาะ “${keep[0].name}”`, { label: T`แสดงทั้งหมด`, action: () => setVis(others, true) });
@@ -1450,7 +1707,7 @@ function frameOf(L) { // what a single layer aligns to: its area, or the canvas
 }
 // how: l c r (horizontal) · t m b (vertical) · dh dv (equal gaps) · size (same size as the main selected layer)
 function arrange(how) {
-  const G = sels().filter((l) => !l.lock && l.type !== 'handfx'); if (!G.length) return;
+  const G = sels().filter((l) => !l.lock && !FULLFX.has(l.type)); if (!G.length) return;
   if ((how === 'dh' || how === 'dv') && G.length < 3) { toast(T`เลือกอย่างน้อย 3 เลเยอร์เพื่อเว้นระยะเท่ากัน`); return; }
   if (how === 'size' && G.length < 2) return;
   const ref = G.length > 1 ? groupBox(G) : frameOf(G[0]), M = sel();
@@ -1474,7 +1731,7 @@ const ARRANGE = () => [['l', 'al-l', T`ชิดซ้าย`], ['c', 'al-c', T`
 function arrangeMenu(x, y) { ctxMenu(x, y, ARRANGE().map(([k, ic, label]) => ({ icon: ic, label, run: () => arrange(k) })), T`จัดเรียง`); }
 // menu items that move layers into / out of areas
 function areaItems(list) {
-  const items = [], free = list.filter((l) => l.type !== 'handfx');
+  const items = [], free = list.filter((l) => !FULLFX.has(l.type));
   if (!free.length) return items;
   items.push({ icon: 'area', label: T`รวมเป็นพื้นที่แอนิเมชัน (Ctrl+G)`, run: () => groupToArea() });
   for (const A of layers().filter((l) => l.type === 'area' && !list.includes(l)).slice(-6).reverse()) items.push({ icon: 'area', label: T`ย้ายเข้า “${A.name}”`, run: () => moveInto(free, A) });
@@ -1554,7 +1811,7 @@ addEventListener('keydown', (e) => {
   if (e.ctrlKey && k === 'v' && e.shiftKey && layerClip && L && L.type === 'area') { e.preventDefault(); pasteLayers(L); return; }
   if (e.ctrlKey && k === 'g' && !e.shiftKey) { e.preventDefault(); if (sels().length) groupToArea(); return; }
   if (e.key === 'F2') { e.preventDefault(); if (L) renameLayer(L); else renameScene(); return; }
-  if (e.ctrlKey && k === 'a' && layers().length && !document.body.classList.contains('anim-mode')) { e.preventDefault(); selectMany(layers().filter((l) => l.type !== 'handfx').map((l) => l.id)); return; }
+  if (e.ctrlKey && k === 'a' && layers().length && !document.body.classList.contains('anim-mode')) { e.preventDefault(); selectMany(layers().filter((l) => !FULLFX.has(l.type)).map((l) => l.id)); return; }
   if (!L) return;
   const G = sels();
   if (e.key === 'Delete' || e.key === 'Backspace') { e.preventDefault(); if (G.length > 1) removeSel(); else removeLayer(L.id); }
@@ -1697,11 +1954,11 @@ function findTarget(ev) {
     if (inTree(T0, items)) return { kind: 'none', label: T`ปล่อยที่เดิม`, ico: 'x' };
     const r = row.getBoundingClientRect(), f = (ev.clientY - r.top) / r.height;
     if (T0.type === 'area' && f > 0.22 && f < 0.78) {
-      if (items.some((x) => x.type === 'handfx')) return { kind: 'none', label: T`เอฟเฟกต์มือใส่ในพื้นที่ไม่ได้`, ico: 'x' };
+      if (items.some((x) => FULLFX.has(x.type))) return { kind: 'none', label: T`เอฟเฟกต์มือใส่ในพื้นที่ไม่ได้`, ico: 'x' };
       return { kind: 'into', A: T0, el: row, cls: 'drop-into', label: T`ใส่ใน “${T0.name}”`, ico: 'area' };
     }
     const above = f < 0.5, P = parentOf(T0.id);
-    if (P && items.some((x) => x.type === 'handfx')) return { kind: 'none', label: T`เอฟเฟกต์มือใส่ในพื้นที่ไม่ได้`, ico: 'x' };
+    if (P && items.some((x) => FULLFX.has(x.type))) return { kind: 'none', label: T`เอฟเฟกต์มือใส่ในพื้นที่ไม่ได้`, ico: 'x' };
     return { kind: 'at', ref: T0, above, el: row, cls: above ? 'drop-above' : 'drop-below', label: P ? T`ย้ายมาตรงนี้ (ใน “${P.name}”)` : T`ย้ายมาตรงนี้`, ico: 'layers' };
   }
   if (el.closest('#scene-box')) {
@@ -1741,7 +1998,7 @@ function endDrag(ev) {
 }
 // move layers (bottom → top order) into an area, next to another layer, or out of the area being edited
 function moveLayers(items, t) {
-  let list = items.filter((x) => x.type !== 'handfx' || t.kind === 'at');
+  let list = items.filter((x) => !FULLFX.has(x.type) || t.kind === 'at');
   if (t.kind === 'into') list = list.filter((x) => !inTree(t.A, [x]));
   if (t.kind === 'at') list = list.filter((x) => !inTree(t.ref, [x]) && !(parentOf(t.ref.id) && inTree(parentOf(t.ref.id), [x])));
   if (!list.length) return;
@@ -1762,7 +2019,7 @@ function moveLayers(items, t) {
 let layerClip = null;
 const CLIP_MARK = 'prism-cam:layers:';
 function copyLayers(cut, list = sels()) {
-  const G = list.filter((l) => !noCopy(l) && l.type !== 'handfx');
+  const G = list.filter((l) => !noCopy(l) && !FULLFX.has(l.type));
   if (list.length && !G.length) { toast(T`เลเยอร์ชนิดนี้คัดลอกไม่ได้`, { kind: 'err' }); return false; }
   if (!G.length) return false;
   const order = allLayers(); G.sort((a, b) => order.indexOf(a) - order.indexOf(b));
@@ -1978,7 +2235,7 @@ function dragLib(e, it, kind, tile) {
 }
 // save layers (an area, or the selection) as a reusable template
 async function saveTemplate(list) {
-  list = list.filter((l) => !noCopy(l) && l.type !== 'handfx'); if (!list.length) return;
+  list = list.filter((l) => !noCopy(l) && !FULLFX.has(l.type)); if (!list.length) return;
   const n = await promptBox(T`ชื่อเทมเพลต`, list.length === 1 ? list[0].name : T`เทมเพลต ${tpls().length + 1}`, T`บันทึก`); if (!n) return;
   const b = groupBox(list), o = out(), x0 = clamp(b.x0, 0, o.w), y0 = clamp(b.y0, 0, o.h), w = clamp(b.x1, 0, o.w) - x0, h = clamp(b.y1, 0, o.h) - y0;
   let thumb = '';
@@ -2108,7 +2365,7 @@ function drawPeek() {
   const r = rt.get(L.id), n = natural(L), o = out();
   let img = null, sx = 0, sy = 0, sw = 0, sh = 0;
   if (n && r && r.el) { const c = L.crop; img = r.el; sx = c.l * n.w; sy = c.t * n.h; sw = n.w * (1 - c.l - c.r); sh = n.h * (1 - c.t - c.b); }
-  else if (L.type !== 'handfx') { // the part of the stage picture where the layer is
+  else if (!FULLFX.has(L.type)) { // the part of the stage picture where the layer is
     const b = groupBox([L]), x0 = clamp(b.x0, 0, o.w), y0 = clamp(b.y0, 0, o.h), x1 = clamp(b.x1, 0, o.w), y1 = clamp(b.y1, 0, o.h);
     if (x1 - x0 > 2 && y1 - y0 > 2) { img = canvas; sx = x0; sy = y0; sw = x1 - x0; sh = y1 - y0; }
   }
@@ -2200,6 +2457,58 @@ function renderProps() {
     for (const [label, run, on, ico, tip] of items) { const b = document.createElement('button'); b.className = 'chip' + (on ? ' on' : '') + (label ? '' : ' ico-only'); b.innerHTML = (ico ? icon(ico) : '') + (label ? `<span>${esc(label)}</span>` : ''); if (tip) b.title = tip; b.onclick = () => { run(); commit(); renderProps(); renderLayers(); }; d.appendChild(b); }
     parent.appendChild(d); return d;
   };
+
+  const pick = (parent, label, obj, key, opts, after) => {
+    const d = row(parent, label, `<label class="field"><select>${opts.map(([v, n]) => `<option value="${esc(v)}">${esc(n)}</option>`).join('')}</select></label>`);
+    const se = d.querySelector('select'); se.value = String(obj[key] ?? ''); se.onchange = () => { obj[key] = se.value; if (after) after(se.value); commit(); renderProps(); };
+    return d;
+  };
+  const note = (parent, text) => { const n = document.createElement('div'); n.className = 'panel-note'; n.textContent = text; parent.appendChild(n); return n; };
+  const faceStatus = (parent) => { const n = note(parent, faceStatusText()); n.dataset.facest = '1'; n.classList.add('face-st'); return n; };
+  const whoOpts = () => [['0', T`หน้าแรก (เห็นนานที่สุด)`], ['1', T`หน้าที่ 2`], ['2', T`หน้าที่ 3`], ['3', T`หน้าที่ 4`]];
+  const faceCfgSec = (parent) => { chips(parent, [[T`ตั้งค่าการจับใบหน้า…`, () => showTab('hand'), false, 'sliders', T`GPU / CPU · ความนิ่ง · ความไวสีหน้า · ปรับให้เข้ากับหน้าคุณ (แท็บติดตาม)`]]).style.marginTop = '6px'; };
+
+  /* — face paint layer — */
+  if (L.type === 'facepaint') {
+    const s1 = sec('face', T`ลายบนหน้า`);
+    faceStatus(s1);
+    chips(s1, [...PAINTS().map(([k, n, c]) => [n, () => { L.paint = k; L.color = c; L.name = n; }, L.paint === k]),
+      [T`ลายของฉัน`, () => { pickAsset().then((a) => { if (!a) return; L.paint = 'custom'; L.asset = a; L.name = T`ลายของฉัน`; commit(); renderProps(); renderLayers(); }); }, L.paint === 'custom', 'image']]).style.margin = '6px 0';
+    if (L.paint !== 'custom') color(s1, T`สี`, L, 'color');
+    slider(s1, T`ความทึบ`, L, 'op', 0, 1, 0.01, (v) => Math.round(v * 100) + '%');
+    pick(s1, T`ผสมสี`, L, 'blend', [['source-over', T`ปกติ`], ['multiply', T`กลืนกับผิว (คูณ)`], ['screen', T`เรืองแสง`], ['overlay', T`ซ้อนทับ`]]);
+    pick(s1, T`ใช้กับหน้าไหน`, L, 'who', [...whoOpts(), ['all', T`ทุกหน้าในภาพ`]], (v) => ensureFaces(v === 'all' ? 4 : +v + 1));
+    chips(s1, [[T`บันทึกแม่แบบไปวาดเอง`, () => faceTemplate().toBlob((b) => b && saveBlob(b, 'PrismCam-face-template.png'), 'image/png'), false, 'download']]).style.marginTop = '6px';
+    note(s1, T`วาดลายบนแม่แบบด้วยโปรแกรมวาดรูป ลบเส้นแม่แบบออก บันทึกเป็น PNG พื้นใส แล้วกด “ลายของฉัน”`);
+    faceCfgSec(s1);
+    return;
+  }
+
+  /* — VTuber character — */
+  if (L.type === 'avatar') {
+    const V = L.av || (L.av = { ...AV_DEF, parts: {} }); V.parts ||= {};
+    const s1 = sec('face', T`ตัวละคร VTuber`);
+    faceStatus(s1);
+    chips(s1, AVATARS().map(([k, n, c1, c2]) => [n, () => { V.kind = k; if (k !== 'png') { V.color = c1; V.color2 = c2; } L.name = n; }, V.kind === k])).style.margin = '6px 0';
+    if (V.kind !== 'png') { color(s1, T`สีหลัก`, V, 'color'); color(s1, T`สีรอง`, V, 'color2'); }
+    else {
+      for (const [slot, name] of AV_SLOTS()) {
+        const has = V.parts[slot] && project.assets[V.parts[slot]];
+        const d = row(s1, name, `<span class="av-slot">${has ? `<img src="${project.assets[V.parts[slot]]}" alt="">` : ''}<button class="chip" data-p>${has ? T`เปลี่ยน` : T`เลือกรูป`}</button>${has ? `<button class="chip" data-c>${T`เอาออก`}</button>` : ''}</span>`);
+        d.querySelector('[data-p]').onclick = async () => { const a = await pickAsset(); if (a) { V.parts[slot] = a; commit(); renderProps(); } };
+        const cl = d.querySelector('[data-c]'); if (cl) cl.onclick = () => { delete V.parts[slot]; commit(); renderProps(); };
+      }
+      note(s1, T`ทุกรูปควรมีขนาดเท่ากันและวางซ้อนกันพอดี (แบบ PNGtuber) — ใส่อย่างน้อย “หัว / หน้า” หรือ “ปากปิด” · มี “ปากอ้า” = ขยับปากตามที่พูด · มี “ตาปิด” = กระพริบตาตาม`);
+    }
+    const m1 = sec('anim', T`การขยับ`);
+    slider(m1, T`ขยับหัวตามหน้า`, V, 'motion', 0, 150, 5, (v) => v + '%');
+    slider(m1, T`เลื่อนตามตำแหน่งหน้า`, V, 'follow', 0, 100, 5, (v) => v + '%');
+    pick(m1, T`ใช้หน้าไหน`, V, 'who', whoOpts(), (v) => ensureFaces(+v + 1));
+    const S = handSource();
+    if (S && S.type === 'camera') chips(m1, [[S.vis ? T`ซ่อนภาพกล้องจริง (ยังจับหน้าต่อ)` : T`แสดงภาพกล้องจริง`, () => setVis([S], !S.vis), !S.vis, S.vis ? 'eyeoff' : 'eye']]).style.marginTop = '6px';
+    note(m1, T`ไม่เห็นหน้า = ตัวละครหายใจ กระพริบตา และโยกตัวเอง`);
+    faceCfgSec(m1);
+  }
 
   /* — hand effects layer — */
   if (L.type === 'handfx') {
@@ -2315,7 +2624,7 @@ function renderProps() {
   }
   // size that never stretches: 100 % = fits the screen (or the area it is in); every selected layer scales by the same factor
   const fitW = (X) => { const P = parentOf(X.id), o = P ? { w: P.w, h: P.h } : out(), ar = X.w / Math.max(1e-6, X.h); return Math.min(o.w, o.h * ar); };
-  const scaleBy = (k) => { for (const X of [L, ...peers]) { if (X.lock || X.type === 'handfx') continue; X.w = Math.max(8, X.w * k); X.h = Math.max(8, X.h * k); } };
+  const scaleBy = (k) => { for (const X of [L, ...peers]) { if (X.lock || FULLFX.has(X.type)) continue; X.w = Math.max(8, X.w * k); X.h = Math.max(8, X.h * k); } };
   const Z = { get k() { return Math.round(L.w / fitW(L) * 100); }, set k(v) { scaleBy(Math.max(5, v) / 100 * fitW(L) / L.w); } };
   slider(lay, T`ขนาด`, Z, 'k', 5, 300, 1, (v) => v + '%').title = T`ย่อ / ขยายโดยไม่ยืด — 100% = พอดีจอ`;
   const n0 = MEDIA.has(L.type) ? natural(L) : null;
@@ -2330,7 +2639,7 @@ function renderProps() {
 
   /* — follow the hand — */
   const A = L.hand || (L.hand = { ...HAND_DEF });
-  const hsec = L.type === 'area' ? null : sec('hand', T`ติดตามมือ`, { get: () => A.on, set: (v) => { A.on = v; if (v) { project.hand.on = true; hp.delete(L.id); for (const X of peers) hp.delete(X.id); bus.emit('hand:cfg'); } } });
+  const hsec = L.type === 'area' ? null : sec('hand', T`ติดตามมือ`, { get: () => A.on, set: (v) => { A.on = v; if (v) { if (L.face) L.face.on = false; project.hand.on = true; hp.delete(L.id); for (const X of peers) hp.delete(X.id); bus.emit('hand:cfg'); } } });
   if (hsec && A.on) {
     const pickRow = (label, key, opts, after) => {
       const d = row(hsec, label, `<label class="field"><select>${opts.map(([v, n]) => `<option value="${esc(v)}">${esc(n)}</option>`).join('')}</select></label>`);
@@ -2346,10 +2655,35 @@ function renderProps() {
     A.smooth ??= 25;
     slider(hsec, T`ความนุ่มนวล`, A, 'smooth', 0, 100, 5, (v) => (v ? v + '%' : T`ติดแน่น`));
     pickRow(T`เมื่อไม่เห็นมือ`, 'lost', [['hide', T`ซ่อน`], ['stay', T`ค้างไว้ที่เดิม`], ['home', T`กลับตำแหน่งตั้งต้น`]]);
-    pickRow(T`มีผลเฉพาะท่า`, 'gest', [['', T`ทุกท่า`], ...gestureList().filter((g) => !g[0].startsWith('swipe')).map((g) => [g[0], g[1] + ' ' + g[2]]), ...customList().map((p) => ['c:' + p.id, '⭐ ' + p.name]), ...pairList().map((g) => [g, gestureName(g)])]);
+    pickRow(T`มีผลเฉพาะท่า`, 'gest', [['', T`ทุกท่า`], ...gestureList().filter((g) => !g[0].startsWith('swipe')).map((g) => [g[0], g[1] + ' ' + g[2]]), ...customList().map((p) => ['c:' + p.id, '⭐ ' + p.name]), ...pairList().map((g) => [g, gestureName(g)]), ...faceExprList().map((g) => [g[0], g[1] + ' ' + g[2]])], () => faceNow());
     if (A.gest) { const gn = document.createElement('div'); gn.className = 'panel-note'; gn.textContent = { hide: T`ไม่ได้ทำท่านี้ = ซ่อนเลเยอร์`, stay: T`ไม่ได้ทำท่านี้ = เลเยอร์ค้างอยู่ที่เดิม ขยับและย่อขยายตามมือเฉพาะตอนทำท่านี้`, home: T`ไม่ได้ทำท่านี้ = เลเยอร์กลับไปตำแหน่งตั้งต้น` }[A.lost] || ''; hsec.appendChild(gn); }
     const hn = document.createElement('div'); hn.className = 'panel-note';
     hn.textContent = T`ลากเลเยอร์บนเวทีขณะที่กล้องเห็นมือ เพื่อเลื่อนตำแหน่งเทียบกับมือ`; hsec.appendChild(hn);
+  }
+
+  /* — ride the face — */
+  const FA = L.face || (L.face = { ...LFACE_DEF });
+  const fsec = L.type === 'area' || L.type === 'avatar' ? null : sec('face', T`ติดตามใบหน้า`, { get: () => FA.on, set: (v) => { FA.on = v; if (v) { A.on = false; if (!FA.ref) { FA.fit = true; FA.ratio ||= faceFit(FA.pt); } hp.delete(L.id); faceNow(); } } });
+  if (fsec && FA.on) {
+    faceStatus(fsec);
+    pick(fsec, T`จุดที่ติด`, FA, 'pt', FACE_PTS().map(([v, n]) => [v, n]), (v) => { FA.ratio = faceFit(v); FA.dyK = v === 'top' ? -0.4 : 0; FA.fit = true; hp.delete(L.id); });
+    pick(fsec, T`หน้าไหน`, FA, 'who', [...whoOpts(), ['all', T`ทุกหน้าในภาพ`]], (v) => ensureFaces(v === 'all' ? 4 : +v + 1));
+    chips(fsec, [
+      [T`หมุนตามหัว`, () => { FA.rot = !FA.rot; }, FA.rot],
+      [T`ย่อขยายตามหน้า`, () => { FA.scale = !FA.scale; }, FA.scale],
+      [T`บิดตามการหันหน้า`, () => { FA.turn = !FA.turn; }, FA.turn, null, T`หันหน้าแล้วของที่ติดจะแคบลงเหมือนหันตามจริง`],
+      [T`วางให้พอดีหน้า`, () => { FA.fit = true; FA.ratio ||= faceFit(FA.pt); }, false, 'fit', T`ปรับขนาดและตำแหน่งให้พอดีกับหน้าที่เห็นตอนนี้`],
+      [T`รีเซ็ตตำแหน่ง`, () => { FA.dx = FA.dy = 0; }],
+    ]).style.margin = '6px 0';
+    slider(fsec, T`ความนุ่มนวล`, FA, 'smooth', 0, 100, 5, (v) => (v ? v + '%' : T`ติดแน่น`));
+    pick(fsec, T`เมื่อไม่เห็นหน้า`, FA, 'lost', [['hide', T`ซ่อน`], ['stay', T`ค้างไว้ที่เดิม`], ['home', T`กลับตำแหน่งตั้งต้น`]]);
+    pick(fsec, T`แสดงเฉพาะตอน`, FA, 'expr', [['', T`ตลอดเวลา`], ...faceExprList().map((g) => [g[0], g[1] + ' ' + g[2]])], () => faceNow());
+    { const wb = project.hand.binds.find((b) => b.action && b.action.cmd === 'layer:' + L.id && b.near);
+      chips(fsec, [[wb ? T`แก้ท่าใส่ / ถอด` : T`ใส่ / ถอดด้วยท่ามือ`, () => wearBind(L), !!wb, 'hand', T`ทำท่าที่หน้าค้าง 1 วินาที ของชิ้นนี้จะโผล่ (ทำอีกครั้ง = หาย) เช่น จีบนิ้วสองข้างใกล้ตา = ใส่แว่น`]]).style.margin = '6px 0 0'; }
+    chips(fsec, [[T`อยู่ในชุดสลับ`, () => { FA.cycle = !FA.cycle; }, FA.cycle, null, T`ของติดหน้าในชุดสลับจะแสดงทีละชิ้น — สลับด้วยท่ามือหรือคำสั่ง`],
+      FA.cycle && [T`ปัดมือซ้าย/ขวาเพื่อสลับ`, () => quickBinds([['swipe-left', 'face-prev'], ['swipe-right', 'face-next']]), false, 'hand']].filter(Boolean)).style.margin = '6px 0';
+    note(fsec, T`ลากเลเยอร์บนเวทีขณะที่กล้องเห็นหน้า เพื่อเลื่อนตำแหน่งเทียบกับหน้า`);
+    faceCfgSec(fsec);
   }
 
   /* — shape of the box — */
@@ -2424,6 +2758,7 @@ function remapClips(c, lm) {
   for (const cl of c.clips || []) { cl.id = cm[cl.id]; cl.next = cm[cl.next] || ''; cl.tracks = cl.tracks.filter((t) => lm[t.layer]).map((t) => ({ ...t, id: uid(), layer: lm[t.layer] })); }
 }
 function showTab(name) {
+  if (name === 'track' || name === 'face') name = 'hand'; // the tracking tab (hands + face) keeps its old id
   if (name === 'lib') renderLib();
   document.querySelectorAll('#panel-tabs .tab').forEach((t) => t.classList.toggle('active', t.dataset.tab === name));
   document.querySelectorAll('.ptab').forEach((t) => t.classList.toggle('active', t.id === 'tab-' + name));
@@ -2495,6 +2830,7 @@ export async function startStudio() {
     else if (c === 'snap') snapshot();
     else if (c === 'rec') toggleRecord();
     else if (c === 'fx-clear') clearHandDrawing();
+    else if (c === 'face-next' || c === 'face-prev') cycleFace(c === 'face-next' ? 1 : -1);
     else if (c.startsWith('layer:')) { const L = byId(c.slice(6)); if (L) { L.vis = !L.vis; commit(); renderLayers(); } }
     else if (c.startsWith('layer-show:') || c.startsWith('layer-hide:')) { const L = byId(c.slice(c.indexOf(':') + 1)); if (L) setVis([L], c.startsWith('layer-show:')); }
     else if (c.startsWith('slide-next:') || c.startsWith('slide-prev:')) { const A = byId(c.slice(c.indexOf(':') + 1)); if (A && A.slides && A.slides.on) slideGo(A, c.startsWith('slide-next:') ? 1 : -1); }
@@ -2532,10 +2868,12 @@ export function releaseAll() {
 }
 addEventListener('pagehide', releaseAll);
 export const studio = {
-  canvas, out, save, layers, addText, addShape, reset, releaseAll,
+  canvas, out, save, layers, addText, addShape, reset, releaseAll, reopenCameras: () => reopenCams([...cams.keys()]), camStates: () => [...cams.values()],
   rebaseNow: () => { rebase(); undoBtn(); queueSave(); },
   sourceOf: (L) => { const r = rt.get(L.id); return r && r.el && natural(L) ? r.el : null; },
   hand: () => project.hand, applyHandCfg, touch, handSource, saveTemplate, slideGo, setVis, solo, arrange, dragLayers, layerMenu, copyLayers, pasteLayers, overStage, hasLayerClip: () => !!layerClip, allLayers, tree, enterArea, exitArea, scope: () => scope, parentOf, scenes: () => project.scenes,
-  addHandFx, addHandText, addHandSticker, refreshProps: renderProps, showTab,
+  addHandFx, addHandText, addHandSticker, refreshProps: renderProps, showTab, wearBind: (id) => { const L = byId(id); if (L) wearBind(L); }, addImageFile, openFacePicker,
+  addFace: (k) => (k.startsWith('pack:') ? addFaceSticker(k.slice(5)) : k.startsWith('paint:') ? addFacePaint(k.slice(6)) : k.startsWith('av:') ? addAvatar(k.slice(3)) : null),
+  faces: () => sceneFaces, faceInfo: () => face, faceCfg: () => project.face, applyFaceCfg, faceInUse: () => faceUse, setFacePreview, faceStatusLong, placeSel: (m) => { const L = sel(); if (L) { place(L, m); commit(); } },
   scene, byId, select, selectMany, selected: () => sel(), selection: () => sels(), renameLayer, renameScene, commit, E, AV, hands: HS, typeLabel, TYPE_ICON, renderLayers, refreshAll, layout,
 };

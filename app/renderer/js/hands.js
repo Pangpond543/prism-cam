@@ -1,7 +1,8 @@
 // Hand tracking manager: feeds camera frames to the worker, keeps a stable "track" per hand, smooths the 21 landmarks
 // (One Euro filter), predicts them forward to hide the model's latency, and turns finger poses into named gestures.
-import { handGap } from './perf.js';
+import { needAi, dropAi, aiOptions, aiInfo, onAi } from './ai.js';
 import { api, native, bus, T } from './core.js';
+import { faceExprName, faceExprEmoji } from './facedefs.js';
 import { predict, trainedSet, customList, customPairList, predictPair, trainedPairSet } from './handml.js';
 const log = (m) => { try { if (native) api.invoke('app:log', m); } catch { /* */ } };
 
@@ -22,6 +23,7 @@ export const gestureName = (id) => {
   id = String(id);
   if (id === 'none') return '💤 ' + T`ไม่มีท่า`;
   if (id === 'pair:none') return '💤 ' + T`สองมือไม่ได้ทำท่า`;
+  if (id.startsWith('f:')) return faceExprName(id) || T`ท่าที่ลบไปแล้ว`;
   if (id.startsWith('pair:c:')) { const p = customPairList().find((x) => 'pair:c:' + x.id === id); return p ? '👐 ' + p.name : T`ท่าที่ลบไปแล้ว`; }
   if (id.startsWith('pair:')) { const g = PAIRS().find((x) => x[0] === id); return g ? `${g[1]} ${g[2]}` : ''; }
   if (id.startsWith('c:')) { const p = customList().find((x) => 'c:' + x.id === id); return p ? '⭐ ' + p.name : T`ท่าที่ลบไปแล้ว`; }
@@ -30,6 +32,7 @@ export const gestureName = (id) => {
 export const gestureEmoji = (id) => {
   id = String(id);
   if (id === 'none' || id === 'pair:none') return '💤';
+  if (id.startsWith('f:')) return faceExprEmoji(id);
   if (id.startsWith('pair:c:')) return '👐';
   if (id.startsWith('pair:')) { const g = PAIRS().find((x) => x[0] === id); return g ? g[1] : ''; }
   if (id.startsWith('c:')) return '⭐';
@@ -81,7 +84,7 @@ function updatePair(ts) {
 }
 
 const cfg = { hands: 2, gpu: true, smooth: 50, predict: 70, swap: false, poses: [] };
-let worker = null, busy = false, busyAt = 0, grabbing = false, nextId = 1, resN = 0, resT = 0;
+let busy = false, nextId = 1, resN = 0, resT = 0;
 export const hands = { state: 'off', delegate: '', err: '', tracks: [], fps: 0, ms: 0, ar: 16 / 9, last: 0, training: false, pair: null };
 
 const alpha = (dt, fc) => 1 / (1 + 1 / (2 * Math.PI * fc * dt));
@@ -95,51 +98,37 @@ const cosAt = (w, a, b, c) => { // angle between a→b and b→c
 export function setHandOptions(o) {
   const was = { hands: cfg.hands, gpu: cfg.gpu };
   Object.assign(cfg, o);
-  if (worker && hands.state === 'ready' && (was.hands !== cfg.hands || was.gpu !== cfg.gpu)) worker.postMessage({ t: 'opt', hands: cfg.hands, gpu: cfg.gpu });
+  if (hands.state === 'ready' && (was.hands !== cfg.hands || was.gpu !== cfg.gpu)) aiOptions('hand', { hands: cfg.hands, gpu: cfg.gpu });
 }
-function start() {
-  hands.state = 'loading'; hands.err = '';
-  try {
-    worker = new Worker(new URL('./hand-worker.js', import.meta.url)); // classic worker (see hand-worker.js)
-  } catch (err) { hands.state = 'failed'; hands.err = String(err); return; }
-  worker.onmessage = (e) => {
-    const d = e.data;
-    if (d.t === 'ready') { hands.state = 'ready'; hands.delegate = d.delegate; log(`hand tracker ready (${d.delegate})`); bus.emit('hand:state'); }
-    else if (d.t === 'fail') { hands.state = 'failed'; hands.err = d.err; busy = false; log(`hand tracker FAILED ${d.err}`); bus.emit('hand:state'); }
-    else if (d.t === 'res') { busy = false; hands.ms += (d.ms - hands.ms) * 0.2; onResult(d); }
-  };
-  worker.onerror = (e) => { hands.state = 'failed'; hands.err = String(e.message || e); busy = false; log(`hand worker error ${hands.err}`); bus.emit('hand:state'); };
-  worker.postMessage({ t: 'init', hands: cfg.hands, gpu: cfg.gpu });
+// the hand model lives in the shared AI worker (ai.js / ai-worker.js)
+function start() { hands.state = 'loading'; hands.err = ''; needAi('hand', { hands: cfg.hands, gpu: cfg.gpu }); syncState(); }
+function syncState() {
+  const i = aiInfo('hand'), was = hands.state;
+  if (hands.state === 'off' && i.state === 'off') return;
+  hands.state = i.state; hands.delegate = i.delegate || ''; hands.err = i.err || '';
+  if (i.state !== 'ready') busy = false;
+  if (was !== hands.state) { if (hands.state === 'ready') log(`hand tracker ready (${hands.delegate})`); else if (hands.state === 'failed') log(`hand tracker FAILED ${hands.err}`); bus.emit('hand:state'); }
 }
+bus.on('ai:state', (m) => { if (m === 'hand') syncState(); });
+onAi('hand', (r, ts) => { busy = false; hands.ms += (r.ms - hands.ms) * 0.2; if (hands.state === 'ready') onResult({ ts, hands: r.hands }); });
 // drop hands that have not been seen for a while (also when the camera stopped sending pictures)
 export function pruneHands(now) {
   for (let i = hands.tracks.length - 1; i >= 0; i--) if (now - hands.tracks[i].seen > 500) { const [tr] = hands.tracks.splice(i, 1); bus.emit('hand:lost', tr); }
   if (hands.tracks.length < 2 && pair.g) { const prev = pair.g; pair.g = pair.raw = ''; pair.n = 0; pair.live = false; bus.emit('hand:pair', '', prev); }
 }
 export function stopHands() {
-  if (worker) { worker.terminate(); worker = null; }
+  dropAi('hand');
   for (const tr of hands.tracks) bus.emit('hand:lost', tr);
   pair.g = pair.raw = ''; pair.n = 0; pair.live = false;
-  hands.tracks.length = 0; hands.state = 'off'; hands.fps = 0; busy = grabbing = false; bus.emit('hand:state');
+  hands.tracks.length = 0; hands.state = 'off'; hands.fps = 0; busy = false; bus.emit('hand:state');
 }
 export function retryHands() { stopHands(); }
 
-// called every frame with the element that shows the tracked camera
-let lastFeed = 0;
-export function feedHands(el, now) {
+// called every frame while hand tracking is on: starts the model; true once it can take pictures
+// (the picture itself is sent by the studio together with the face job — see trackAi in studio.js)
+export function handsReady() {
   if (hands.state === 'off') start();
-  if (hands.state !== 'ready') return;
-  if (busy && now - busyAt > 2500) busy = false; // the worker never answered: do not stall forever
-  if (busy || grabbing) return;
-  if (now - lastFeed < handGap()) return; // ~30 a second (15 in light mode): more only costs CPU
-  const vw = el.videoWidth || el.naturalWidth || 0, vh = el.videoHeight || el.naturalHeight || 0;
-  if (!vw || !vh) return;
-  hands.ar = vw / vh;
-  const k = Math.min(1, 640 / vw);
-  grabbing = true; lastFeed = now;
-  createImageBitmap(el, { resizeWidth: Math.round(vw * k), resizeHeight: Math.round(vh * k), resizeQuality: 'low' })
-    .then((bmp) => { if (!worker || hands.state !== 'ready') { bmp.close(); return; } busy = true; busyAt = now; worker.postMessage({ t: 'frame', bmp, ts: now }, [bmp]); }, () => {})
-    .finally(() => { grabbing = false; });
+  return hands.state === 'ready';
 }
 
 /* ----------------------------------------------------------------- tracks */

@@ -25,8 +25,9 @@
   <!-- ───────────── title bar (Prism suite shell) ───────────── -->
   <header id="titlebar" class="glass refract">
     <div class="brand tb-drag" data-tauri-drag-region>
-      <div class="prism-logo" data-tauri-drag-region><i></i><i></i><i></i></div>
+      <div class="prism-logo" data-tauri-drag-region><i></i><i></i><i></i><b class="lg"><svg viewBox="18 18 64 64" aria-hidden="true"><path d="M38 33 L43 27 H57 L62 33 Z" fill="#fff"/><rect x="26" y="33" width="48" height="36" rx="9" fill="#fff"/><circle cx="50" cy="51" r="11" fill="var(--lg-deep)"/><circle cx="50" cy="51" r="5.5" fill="#fff"/></svg></b></div>
       <span class="brand-name" data-tauri-drag-region>Prism Cam</span>
+      <span class="brand-sig" data-tauri-drag-region title="by 543">by 543</span>
     </div>
     <div id="crumbs" class="crumbs"></div>
     <div class="tb-drag tb-fill" data-tauri-drag-region></div>
@@ -58,6 +59,7 @@
     <button class="dock-btn" data-add="area"><span data-icon="area"></span><em>พื้นที่แอนิเมชัน</em></button>
     <i class="dock-sep"></i>
     <button class="dock-btn" data-add="handfx"><span data-icon="hand"></span><em>เอฟเฟกต์มือ</em></button>
+    <button class="dock-btn" data-add="face"><span data-icon="face"></span><em>ใบหน้า — ติดหน้า · ลาย · VTuber</em></button>
   </div></nav>
 
   <!-- ───────────── stage ───────────── -->
@@ -96,7 +98,7 @@
       <div class="tabs" id="panel-tabs">
         <button class="tab active" data-tab="layers" title="เลเยอร์"><span data-icon="layers"></span><span>เลเยอร์</span></button>
         <button class="tab" data-tab="props" title="ปรับแต่ง"><span data-icon="sliders"></span><span>ปรับแต่ง</span></button>
-        <button class="tab" data-tab="hand" title="มือ"><span data-icon="hand"></span><span>มือ</span></button>
+        <button class="tab" data-tab="hand" title="ติดตาม — มือ และ ใบหน้า"><span data-icon="hand"></span><span>ติดตาม</span></button>
         <button class="tab" data-tab="lib" title="คลัง"><span data-icon="folder"></span><span>คลัง</span></button>
       </div>
     </div>

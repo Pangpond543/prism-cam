@@ -2,8 +2,10 @@
 // timings per part of the frame, and "copy" so a friend can paste the numbers into a chat.
 import { bus, T, toast, esc, $ } from './core.js';
 import { icon } from './icons.js';
-import { perf, renderScale, liveFps, setLite, setAuto, setGpu } from './perf.js';
+import { perf, renderScale, liveFps, setLite, setAuto, setGpu, handGap } from './perf.js';
 import { hands } from './hands.js';
+import { face } from './face.js';
+import { laneMs, laneGap } from './ai.js';
 import { studio } from './studio.js';
 
 let pop = null;
@@ -19,6 +21,8 @@ function rows() {
     [T`วาดภาพ`, ms(perf.ms.draw), perf.ms.draw > 1000 / o.fps * 0.7 ? 'bad' : ''],
     [T`AI ลบพื้นหลัง`, perf.ms.seg ? ms(perf.ms.seg) : T`ไม่ได้ใช้`, ''],
     [T`จับมือ`, hands.state === 'ready' ? ms(hands.ms) : T`ไม่ได้ใช้`, ''],
+    [T`จับใบหน้า`, face.state === 'ready' ? `${ms(face.ms)} · ${face.fps} ${T`ครั้ง/วินาที`}` : T`ไม่ได้ใช้`, ''],
+    (hands.state === 'ready' || face.state === 'ready') && laneMs('track') ? [T`AI รอบละ (มือ + หน้า)`, `${ms(laneMs('track'))} · ${T`ทุก`} ${Math.round(laneGap('track', handGap()))} ms`, ''] : null,
     [T`แปลงภาพส่ง Discord`, perf.sent ? `${ms(perf.ms.send)} · ${perf.path === 'gpu' ? T`การ์ดจอ` : 'CPU'}` : '—', ''],
     [T`การ์ดจอ`, perf.igpu || '—', ''],
   ].filter(Boolean);

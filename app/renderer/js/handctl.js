@@ -5,6 +5,7 @@ import { api, native, bus, T, toast } from './core.js';
 import { hands, pickHand } from './hands.js';
 import { studio } from './studio.js';
 import { prof } from './handml.js';
+import { faceExprSince, handsNearFace } from './face.js';
 
 export const ctl = { armed: false, mouse: false };
 let warnAt = 0, mouseTrack = null;
@@ -74,17 +75,36 @@ export function fire(b, phase = 'start') {
 }
 function tickBinds(now) {
   for (const tr of hands.tracks) tr.hold = 0;
+  hands.faceHold = null; // { k: 0..1, zone } — the preview draws a ring around that spot of the face
   if (hands.training) { for (const [id, s] of bs) if (s.fired) { s.fired = false; const b = studio.hand().binds.find((x) => x.id === id); if (b && b.mode === 'hold') fire(b, 'end'); } return; } // never fire commands while teaching gestures
   for (const b of studio.hand().binds) {
     if (!b.on || !b.gesture || b.gesture.startsWith('swipe')) continue;
     const s = bs.get(b.id) || bs.set(b.id, { fired: false, last: 0 }).get(b.id);
-    // two-hand poses come from the pair detector (the hand-side choice does not apply); one-hand poses from a track
-    const isPair = b.gesture.startsWith('pair:'), pr = isPair && hands.pair && hands.pair.g === b.gesture ? hands.pair : null;
-    const tr = pr ? hands.tracks.find((t) => t.id === pr.ids[0]) : isPair ? null : hands.tracks.find((t) => t.g === b.gesture && t !== mouseTrack && now - t.seen < 400 && sideOk(t, b.hand));
-    if (tr) {
-      const held = now - (pr ? pr.since : tr.gSince), need = b.hold || 0;
-      if (!s.fired) { if (need >= 250) for (const t of pr ? hands.tracks.filter((x) => pr.ids.includes(x.id)) : [tr]) t.hold = Math.max(t.hold, held / need); if (held >= need) { s.fired = true; s.last = now; fire(b, 'start'); } }
-      else if (b.mode === 'repeat' && now - s.last >= Math.max(120, b.every || 500)) { s.last = now; fire(b, 'repeat'); }
+    if (b.gesture.startsWith('f:')) { // a face gesture (expression / head move / hand on the face)
+      const since = faceExprSince(b.gesture);
+      if (since) { const held = now - since; if (!s.fired) { if (held >= (b.hold || 0)) { s.fired = true; s.last = now; fire(b, 'start'); } } else if (b.mode === 'repeat' && now - s.last >= Math.max(120, b.every || 500)) { s.last = now; fire(b, 'repeat'); } }
+      else if (s.fired) { s.fired = false; if (b.mode === 'hold') fire(b, 'end'); }
+      continue;
+    }
+    // two-hand poses come from the pair detector (the hand-side choice does not apply); one-hand poses from a track,
+    // or from two tracks making the same pose ("both hands"); "hand position" also asks for the spot of the face
+    const isPair = b.gesture.startsWith('pair:'), pr = isPair && hands.pair && hands.pair.g === b.gesture ? hands.pair : null, near = b.near || '';
+    let list = null;
+    if (pr) list = hands.tracks.filter((t) => pr.ids.includes(t.id));
+    else if (!isPair) {
+      const ts = hands.tracks.filter((t) => t.g === b.gesture && t !== mouseTrack && now - t.seen < 400 && (b.hand === 'both' || sideOk(t, b.hand)));
+      if (b.hand === 'both') list = ts.length >= 2 ? ts.slice(0, 2) : null;
+      else { const t = near ? ts.find((x) => handsNearFace([x], near, now)) : ts[0]; list = t ? [t] : null; }
+    }
+    if (list && near && (list.length > 1 || pr) && !handsNearFace(list, near, now)) list = null;
+    // a gesture at the face toggles things (glasses on / off): after it fired, wait a moment before it can again
+    if (list && !s.fired && (near || b.hand === 'both') && now - s.last < 1200) list = null;
+    if (list && list.length) {
+      const held = now - (pr ? pr.since : Math.max(...list.map((t) => t.gSince))), need = b.hold || 0;
+      if (!s.fired) {
+        if (need >= 250) { for (const t of list) t.hold = Math.max(t.hold, held / need); if (near && (!hands.faceHold || hands.faceHold.k < held / need)) hands.faceHold = { k: Math.min(1, held / need), zone: near }; }
+        if (held >= need) { s.fired = true; s.last = now; fire(b, 'start'); }
+      } else if (b.mode === 'repeat' && now - s.last >= Math.max(120, b.every || 500)) { s.last = now; fire(b, 'repeat'); }
     } else if (s.fired) { s.fired = false; if (b.mode === 'hold') fire(b, 'end'); }
   }
 }

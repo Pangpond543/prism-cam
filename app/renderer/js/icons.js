@@ -72,6 +72,7 @@ Object.assign(ICONS, {
   drop: S('<path d="M12 3.500s6.500 6.500 6.500 11a6.500 6.500 0 0 1-13 0c0-4.500 6.500-11 6.500-11z"/>'),
   front: S('<path d="M12 19V6M6.500 11.500L12 6l5.500 5.500M5 3.500h14"/>'),
   back: S('<path d="M12 5v13M6.500 12.500L12 18l5.500-5.500M5 20.500h14"/>'),
+  face: S('<circle cx="12" cy="12" r="9"/><circle cx="8.6" cy="10.4" r="1.9"/><circle cx="15.4" cy="10.4" r="1.9"/><path d="M10.5 10.4h3M8.8 15s1.2 1.6 3.2 1.6 3.2-1.6 3.2-1.6"/>'),
   hand: S('<path d="M8 12.5V6a1.5 1.5 0 0 1 3 0v5M11 11V4.5a1.5 1.5 0 0 1 3 0V11M14 11V5.5a1.5 1.5 0 0 1 3 0V12M17 9.5a1.5 1.5 0 0 1 3 0V14a7 7 0 0 1-7 7h-.6a6 6 0 0 1-4.6-2.2L4.3 14.6a1.6 1.6 0 0 1 2.4-2.1L8 14"/>'),
   pipTl: S('<rect x="3" y="5" width="18" height="14" rx="3"/><rect x="5.5" y="7.5" width="7" height="5" rx="1.4" fill="currentColor" stroke="none"/>'),
   pipTr: S('<rect x="3" y="5" width="18" height="14" rx="3"/><rect x="11.5" y="7.5" width="7" height="5" rx="1.4" fill="currentColor" stroke="none"/>'),

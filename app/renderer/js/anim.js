@@ -1,6 +1,7 @@
 // Animation mode — takes over the studio like an "Edit" mode: transport toolbar on top, timeline / graph editor at the
 // bottom, keyframe · clip · trigger inspector on the right and a motion path on the stage. Clips start from hand gestures
 // (the existing gesture → command system), hotkeys, the scene opening, other clips, timeline events, or follow the hand.
+import { faceExprList, isFaceDrive } from './facedefs.js';
 import { bus, T, toast, htmlBox, promptBox, confirmBox, ctxMenu, esc, clamp, theme, $ } from './core.js';
 import { icon } from './icons.js';
 import { studio, hooks } from './studio.js';
@@ -177,12 +178,16 @@ function toggleKey(c, L, key) {
   commit();
 }
 function addKeyAll() {
-  const c = clip(), L = selL(); if (!c) return;
-  if (!L) { toast(T`เลือกเลเยอร์ก่อน แล้วกด K เพื่อใส่คีย์เฟรม`); return; }
-  const trs = c.tracks.filter((t) => t.layer === L.id);
-  const keys = trs.length ? trs.map((t) => t.prop) : ['x', 'y', 'sc', 'rot', 'op'].filter((k) => A.propsFor(L).some((p) => p.key === k));
-  for (const key of keys) A.setKey(c, A.ensureTrack(c, L.id, key), tNow(), dispV(c, L, key));
-  autoExpand(L.id); commit();
+  const c = clip(), L0 = selL(); if (!c) return;
+  if (!L0) { toast(T`เลือกเลเยอร์ก่อน แล้วกด K เพื่อใส่คีย์เฟรม`); return; }
+  // every selected layer gets its keys (not only the one the panels show)
+  const many = studio.selection().filter((x) => x.type !== 'handfx' && x.type !== 'facepaint');
+  for (const L of many.includes(L0) ? many : [L0, ...many]) {
+    const trs = c.tracks.filter((t) => t.layer === L.id);
+    const keys = trs.length ? trs.map((t) => t.prop) : ['x', 'y', 'sc', 'rot', 'op'].filter((k) => A.propsFor(L).some((p) => p.key === k));
+    for (const key of keys) { const v = dispV(c, L, key); A.setKey(c, A.ensureTrack(c, L.id, key), tNow(), v); }
+  }
+  autoExpand(L0.id); commit();
 }
 
 /* =========================================================== key editing */
@@ -317,7 +322,7 @@ async function staggerSel() {
 function applyPreset(name, cat) {
   const c = clip(), L0 = selL();
   if (!c) return; if (!L0) { toast(T`เลือกเลเยอร์ก่อน แล้วเลือกพรีเซ็ต`); return; }
-  const G = studio.selection().filter((x) => x.type !== 'handfx');
+  const G = studio.selection().filter((x) => x.type !== 'handfx' && x.type !== 'facepaint');
   if (!G.length) { toast(T`เลเยอร์เอฟเฟกต์มือใช้ได้เฉพาะการแสดง / ซ่อน`, { kind: 'err' }); return; }
   // several layers: top of the list first, each one starting "stagger" seconds after the previous
   const order = studio.tree().map((r) => r.L.id); G.sort((a, b) => order.indexOf(a.id) - order.indexOf(b.id));
@@ -591,7 +596,7 @@ function renderKeysTab(body, c) {
   renderSelKeys(body, c);
   const L = selL();
   if (!L) { const s = sec(body, 'layers', T`คุณสมบัติ`); note(s, T`เลือกเลเยอร์บนเวทีหรือในไทม์ไลน์ เพื่อดูและใส่คีย์เฟรมให้คุณสมบัติของมัน`); return; }
-  const G = [L, ...studio.selection().filter((x) => x !== L && x.type !== 'handfx')];
+  const G = [L, ...studio.selection().filter((x) => x !== L && x.type !== 'handfx' && x.type !== 'facepaint')];
   const head = el('div', 'kp-head', `<span class="l-ico">${icon(G.length > 1 ? 'layers' : studio.TYPE_ICON[L.type])}</span><span class="l-name">${G.length > 1 ? T`${G.length} เลเยอร์ที่เลือก` : esc(L.name)}<small>${G.length > 1 ? esc(T`ค่า / คีย์ที่ใส่ตรงนี้ใช้กับทุกเลเยอร์ · ลากตัวเลข = ขยับทุกอันเท่ากัน · พิมพ์ +10 หรือ *2 ได้ · แสดงค่าของ “${L.name}”`) : esc(studio.typeLabel(L.type))}${c.mode === 'add' ? ' · ' + T`โหมดบวกเพิ่ม (ค่าคือระยะเปลี่ยน)` : ''}</small></span>`);
   body.appendChild(head);
   const props = A.propsFor(L).filter((p) => G.every((X) => A.propsFor(X).some((q) => q.key === p.key)));
@@ -897,11 +902,11 @@ function renderTrigTab(body, c) {
   /* hand-driven time */
   const D = c.drive;
   const dv = sec(body, 'radar', T`ควบคุมเวลาด้วยมือ (สด)`);
-  select(dv, T`ใช้ค่าจาก`, D.src, A.DRIVES(), (v) => { D.src = v; if (v !== 'none') ensureHands(); commit(); });
+  select(dv, T`ใช้ค่าจาก`, D.src, A.DRIVES(), (v) => { D.src = v; if (v !== 'none' && !isFaceDrive(v)) ensureHands(); commit(); });
   if (D.src !== 'none') {
     if (D.src !== 'spread') select(dv, T`มือ`, D.side, [['any', T`มือไหนก็ได้`], ['right', T`มือขวา`], ['left', T`มือซ้าย`]], (v) => { D.side = v; commit(); });
     // only while the hand makes this pose (any other pose = "hand not seen")
-    select(dv, T`ทำงานเฉพาะท่ามือ`, D.gest || '', [['', T`ทุกท่า`], ...gestureList().filter((g) => !g[0].startsWith('swipe')).map((g) => [g[0], g[1] + ' ' + g[2]]), ...customList().map((p) => ['c:' + p.id, '⭐ ' + p.name]), ...pairList().map((g) => [g, gestureName(g)])], (v) => { D.gest = v; commit(); });
+    select(dv, T`ทำงานเฉพาะท่ามือ`, D.gest || '', [['', T`ทุกท่า`], ...gestureList().filter((g) => !g[0].startsWith('swipe')).map((g) => [g[0], g[1] + ' ' + g[2]]), ...customList().map((p) => ['c:' + p.id, '⭐ ' + p.name]), ...pairList().map((g) => [g, gestureName(g)]), ...faceExprList().map((g) => [g[0], g[1] + ' ' + g[2]])], (v) => { D.gest = v; commit(); });
     chips(dv, [
       [T`จับแล้วลาก (ไม่กระโดด)`, () => { D.grab = !D.grab; commit(); }, !!D.grab, 'hand'],
       [T`ตั้งเร็ว: กำมือแล้วเลื่อน`, () => { D.gest = 'fist'; D.grab = true; D.lost = 'hold'; commit(); }, false, 'bolt'],

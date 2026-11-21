@@ -4,7 +4,8 @@ import { icon, hydrateIcons } from './icons.js';
 import { translateDom } from './i18n.js';
 import { startBackground } from './bg.js';
 import { startStudio, studio } from './studio.js';
-import { startHandUi } from './handui.js';
+import { startHandUi, calibrate as calibrateFaceUi, renderHand } from './handui.js';
+import { facePerson, saveFacePerson, clearFaceCalib, handsNearFace, face as faceSt } from './face.js';
 import { setArmed } from './handctl.js';
 import { startAnim } from './anim.js';
 import { perf, nv12, ema, countSent, countBusy, setLite, setGpu, detectIgpu, calm } from './perf.js';
@@ -19,7 +20,7 @@ async function showInfo() {
   const link = info.repo ? `https://github.com/${info.repo}` : '';
   htmlBox(`
     <div class="about">
-      <div class="prism-logo big"><i></i><i></i><i></i></div>
+      <div class="prism-logo big"><i></i><i></i><i></i><b class="lg"><svg viewBox="18 18 64 64" aria-hidden="true"><path d="M38 33 L43 27 H57 L62 33 Z" fill="#fff"/><rect x="26" y="33" width="48" height="36" rx="9" fill="#fff"/><circle cx="50" cy="51" r="11" fill="var(--lg-deep)"/><circle cx="50" cy="51" r="5.5" fill="#fff"/></svg></b></div>
       <h3>Prism Cam <small>v${esc(info.version)}</small></h3>
       <p class="about-purpose">${esc(PURPOSE)}</p>
       <dl class="kv">
@@ -40,6 +41,7 @@ async function showInfo() {
       extract: T`แตกไฟล์อัปเดตไม่สำเร็จ`, layout: T`ไฟล์อัปเดตมีโครงสร้างไม่ถูกต้อง`, notprism: T`ไฟล์ที่ดาวน์โหลดมาไม่ใช่โปรแกรม Prism`,
       build: T`คอมไพล์เวอร์ชันใหม่ไม่สำเร็จ — ต้องติดตั้ง Rust (cargo) ในเครื่องนี้`,
       noasset: T`เวอร์ชันใหม่ยังไม่มีไฟล์สำหรับอัปเดตอัตโนมัติ — กดลิงก์ GitHub ด้านบนเพื่อดาวน์โหลดเอง`,
+      git: T`สำเนานี้เป็นโฟลเดอร์ซอร์สโค้ดที่กำลังพัฒนาอยู่ — ปิดการอัปเดตอัตโนมัติไว้ เพื่อไม่ให้เขียนทับงานที่ยังไม่ได้ปล่อย`,
     }[r.reason] || T`เกิดข้อผิดพลาดระหว่างอัปเดต`);
     m.querySelector('[data-x]').onclick = () => close(null);
     if (link) m.querySelector('#about-repo').onclick = (e) => { e.preventDefault(); api.invoke('about:openRepo'); };
@@ -50,9 +52,11 @@ async function showInfo() {
     const apply = async () => {
       btn.disabled = true;
       say(T`<span>กำลังดาวน์โหลด…</span><div class="progress indet"><i></i></div>`);
+      const wasLive = vcam.on;
       await beforeUpdate();
       const r = await api.invoke('update:apply');
-      if (!r.ok) { say(`<span class="bad">${esc(why(r))}</span>`); btn.disabled = false; return; }
+      // nothing was replaced: turn the cameras (and the virtual camera) back on — they used to stay frozen
+      if (!r.ok) { say(`<span class="bad">${esc(why(r))}</span>`); btn.disabled = false; studio.reopenCameras(); if (wasLive) toggleVcam(); return; }
       say(`<span class="good">${T`ติดตั้งเวอร์ชัน ${esc(r.version)} แล้ว — เริ่มโปรแกรมใหม่เพื่อใช้งาน`}</span>`);
       btn.innerHTML = T`<span>เริ่มโปรแกรมใหม่</span>`; btn.disabled = false;
       btn.onclick = () => { off(); api.invoke('app:relaunch'); };
@@ -137,7 +141,8 @@ bus.on('frame', (c) => {
   sent.then(() => { vcam.fails = 0; countSent(); }, () => { if (++vcam.fails > 90) { setVcam(false); toast(T`กล้องเสมือนหยุดทำงาน`, { kind: 'err' }); } })
     .finally(() => { vcam.inflight--; });
 });
-bus.on('out', async () => { if (vcam.on) { await stopVcam(); toggleVcam(); } });
+// output size changed: nothing to restart — the camera driver letterboxes any frame size into what the app (Discord …)
+// asked for. Restarting it used to kick Discord off "Prism Cam" every time the size was changed.
 
 /* -------------------------------------------------------------------- boot */
 async function boot() {
@@ -148,7 +153,15 @@ async function boot() {
   startBackground($('bg'));
   $('win-min').onclick = () => api.invoke('win:min');
   $('win-max').onclick = () => api.invoke('win:max');
-  $('win-close').onclick = async () => { await setArmed(false); await studio.save(); studio.releaseAll(); if (vcam.on) await stopVcam(); if (native) api.invoke('win:close'); else window.close(); };
+  let closing = false;
+  const closeApp = async () => {
+    if (closing) return; closing = true;
+    try { await setArmed(false); await studio.save(); studio.releaseAll(); if (vcam.on) await stopVcam(); } catch (err) { console.error('close', err); }
+    await api.invoke('app:log', 'close: saved, cameras released').catch(() => {});
+    if (native) api.invoke('win:close'); else window.close();
+  };
+  $('win-close').onclick = closeApp;
+  api.on('app:close', closeApp); // Alt+F4 / taskbar close
   $('btn-info').onclick = showInfo;
   $('btn-vcam').onclick = toggleVcam;
   const themeIcon = () => { $('btn-theme').firstElementChild.innerHTML = icon(theme.dark ? 'day' : 'moon'); };
@@ -196,6 +209,7 @@ async function boot() {
     if (act === 'en' || act === 'th') { if (lang !== act) { remember('prism.lang', act); location.reload(); return; } }
     else if (act === 'dark' || act === 'light') { setTheme(act === 'dark'); themeIcon(); }
     else if (act === 'info') showInfo();
+    else if (act === 'updfake') window.__prismUpdFake = true;
     else if (act === 'vcam') await toggleVcam();
     else if (act === 'vcamtest') { // open our own virtual camera and report what comes out of it
       await wait(2500);
@@ -274,9 +288,88 @@ async function boot() {
     else if (act.startsWith('tab:')) studio.showTab(act.slice(4));
     else if (act === 'unguard') { try { localStorage.removeItem('prismCamOpening'); } catch { /* */ } api.invoke('app:log', 'unguard: camera guard cleared'); }
     else if (act === 'clear') { studio.reset(); }
+    // camera unplug self-test: camlost = the open cameras report "ended" (as when the USB cable is pulled), devchange = Windows re-lists devices
+    else if (act === 'camlost') { for (const c of studio.camStates()) if (c.stream) c.stream.getVideoTracks().forEach((t) => t.dispatchEvent(new Event('ended'))); await wait(500); api.invoke('app:log', 'camlost: ' + studio.camStates().map((c) => `failed=${c.failed} lost=${!!c.lost} stream=${!!c.stream}`).join(' | ')); }
+    else if (act === 'devchange') { navigator.mediaDevices.dispatchEvent(new Event('devicechange')); await wait(1700); }
+    else if (act === 'camlog') api.invoke('app:log', 'camlog: ' + studio.camStates().map((c) => `failed=${c.failed} lost=${!!c.lost} stream=${!!c.stream} w=${c.video.videoWidth}`).join(' | ') + ' mem=' + Math.round((performance.memory || {}).usedJSHeapSize / 1e6 || 0) + 'MB');
+    else if (act.startsWith('camcycle:')) { // reopen every camera N times (open / close repeatedly)
+      for (let i = 0; i < +act.slice(9); i++) { studio.reopenCameras(); await wait(4000); }
+      api.invoke('app:log', 'camcycle done: ' + studio.camStates().map((c) => `failed=${c.failed} stream=${!!c.stream} w=${c.video.videoWidth}`).join(' | ') + ' mem=' + Math.round((performance.memory || {}).usedJSHeapSize / 1e6 || 0) + 'MB');
+    }
+    else if (act.startsWith('imgb64:')) { try { const b = await (await fetch('data:image/jpeg;base64,' + act.slice(7))).blob(); await studio.addImageFile(new File([b], 'test.jpg', { type: 'image/jpeg' })); } catch (err) { api.invoke('app:log', 'imgb64: ' + err); } await wait(800); }
+    else if (act.startsWith('img:')) { try { const b = await (await fetch(act.slice(4))).blob(); await studio.addImageFile(new File([b], act.split('/').pop(), { type: (b.type || '').startsWith('image/') ? b.type : 'image/jpeg' })); } catch (err) { api.invoke('app:log', 'img: ' + err); } await wait(800); }
+    else if (act.startsWith('place:')) { studio.placeSel(act.slice(6)); await wait(300); }
+    else if (act === 'unsel') { studio.select(null); await wait(200); }
+    else if (act.startsWith('selai:')) { const L = studio.layers().find((l) => l.type === 'image'); if (L) { L.ai.mode = act.slice(6); studio.commit(); } await wait(300); }
+    else if (act === 'hidesrc') { const L = studio.layers().find((l) => l.type === 'image'); if (L) studio.setVis([L], false); await wait(300); }
+    else if (act === 'facecal') { const p = calibrateFaceUi(); await wait(7000); await p; api.invoke('app:log', 'facecal: ' + JSON.stringify(facePerson.calib)); }
+    else if (act === 'facecalclear') { clearFaceCalib(); renderHand(); }
+    else if (act === 'faceswap') { facePerson.swap = !facePerson.swap; saveFacePerson(); renderHand(); api.invoke('app:log', 'faceswap: ' + facePerson.swap); }
+    else if (act.startsWith('faceset:')) { const [k, v] = act.slice(8).split('='); studio.faceCfg()[k] = v === 'true' ? true : v === 'false' ? false : +v; studio.applyFaceCfg(); renderHand(); await wait(1500); }
+    else if (act === 'wearbind') { const L = studio.allLayers().find((l) => l.face && l.face.on); if (L) studio.wearBind(L.id); await wait(500); api.invoke('app:log', 'wearbind: ' + JSON.stringify(studio.hand().binds.filter((b) => b.near))); }
+    else if (act.startsWith('weartoggle')) { const L = studio.allLayers().find((l) => l.face && l.face.on); if (L) { bus.emit('cmd', 'layer:' + L.id); await wait(+act.slice(11) || 600); api.invoke('app:log', `weartoggle: vis=${L.vis}`); } }
+    else if (act === 'unbindnear') { const h = studio.hand(); h.binds = h.binds.filter((b) => !b.near); h.on = false; studio.applyHandCfg(); studio.touch(); renderHand(); }
+    else if (act === 'nearsim') { // synthetic hands at / away from each face zone → handsNearFace (no real hands needed)
+      const t = faceSt.tracks[0], out = [];
+      if (t) {
+        const lm = t.lm, P = (i) => [lm[i * 3], lm[i * 3 + 1]], hand = (x, y) => { const p = new Float32Array(42); for (let i = 0; i < 21; i++) { p[i * 2] = x; p[i * 2 + 1] = y; } return { palm: [x, y], p }; };
+        const eL = P(33), eR = P(263), m = P(13), far = hand(0.02, 0.98), now = performance.now();
+        out.push('eyes2=' + handsNearFace([hand(...eL), hand(...eR)], 'eyes', now), 'eyesSame=' + handsNearFace([hand(...eL), hand(eL[0] + 0.001, eL[1])], 'eyes', now),
+          'eyes1=' + handsNearFace([hand(...eL)], 'eyes', now), 'eyesFar=' + handsNearFace([far, hand(...eR)], 'eyes', now), 'mouth=' + handsNearFace([hand(...m)], 'mouth', now),
+          'mouthAtEye=' + handsNearFace([hand(...eL)], 'mouth', now), 'top=' + handsNearFace([hand(lm[30], lm[31] - 0.08)], 'top', now));
+      }
+      api.invoke('app:log', 'nearsim: ' + (out.join(' ') || 'no face'));
+    }
+    else if (act === 'facepick') { studio.openFacePicker(); await wait(900); }
+    else if (act.startsWith('face:')) { await studio.addFace(act.slice(5)); await wait(600); }
+    else if (act.startsWith('facelog:')) { for (let i = 0; i < +act.slice(8); i++) { await wait(1000); const f = studio.faces()[0]; const m = `facelog: state=${studio.faceInfo().state} dl=${studio.faceInfo().delegate} n=${studio.faces().length} fps=${studio.faceInfo().fps} ms=${studio.faceInfo().ms.toFixed(1)}` + (f ? ` w=${f.w.toFixed(0)} cx=${f.cx.toFixed(0)} cy=${f.cy.toFixed(0)} yaw=${(f.yaw * 57.3).toFixed(0)} pitch=${(f.pitch * 57.3).toFixed(0)} roll=${(f.roll * 57.3).toFixed(0)} mouth=${f.mouth.toFixed(2)} smile=${f.smile.toFixed(2)} eyeL=${f.eyeL.toFixed(2)} eyeR=${f.eyeR.toFixed(2)}` : ''); api.invoke('app:log', m); console.log(m); } }
     else if (act.startsWith('chip:')) { const c = [...document.querySelectorAll('#tab-props .chip')].find((x) => x.textContent.trim() === act.slice(5)); if (c) c.click(); await wait(6000); }
     else { const b = document.querySelector('.dock-btn[data-add="' + act + '"]'); if (b) b.click(); await wait(1500); const p = [...document.querySelectorAll(".pick")]; if (p.length) (p.find((x) => /usb/i.test(x.textContent)) || p[p.length - 1]).click(); }
     await wait(350);
   }
 }
 boot();
+
+/* >>> prism-update-nudge (tools/brand/apply-web.js) */
+{
+  // Checks GitHub quietly a few seconds after start (and every 6 h). New version → dot on Info + a chip that slides out
+  // once per version; clicking either opens Info already showing "Update now".
+  const btn = document.getElementById('btn-info'), SEEN = 'prism.updSeen';
+  let found = null;
+  const chipOut = (r) => {
+    let seen = null; try { seen = localStorage.getItem(SEEN); } catch {}
+    if (seen === r.latest || document.querySelector('.upd-chip')) return;
+    const chip = document.createElement('button');
+    chip.className = 'upd-chip';
+    chip.innerHTML = `<i></i><span>${T`มีเวอร์ชันใหม่ v${esc(r.latest)}`}</span><u>${T`(ตอนนี้ v${esc(r.current)})`}</u><b>${T`อัปเดต`}</b>`;
+    document.body.appendChild(chip);
+    const place = () => { const b = btn.getBoundingClientRect(); chip.style.top = `${b.bottom + 10}px`; chip.style.right = `${Math.max(8, innerWidth - b.right - 6)}px`; };
+    place(); addEventListener('resize', place);
+    requestAnimationFrame(() => requestAnimationFrame(() => chip.classList.add('show')));
+    const hide = () => { chip.classList.remove('show'); removeEventListener('resize', place); setTimeout(() => chip.remove(), 450); };
+    chip.onclick = () => { hide(); btn.click(); };
+    setTimeout(hide, 10000);
+  };
+  const check = async () => {
+    let r; try { r = window.__prismUpdFake ? { ok: true, hasUpdate: true, latest: '9.9.9', current: '1.0.0' } : await api.invoke('update:check'); } catch { return; } // __prismUpdFake = test hook (PRISM_ACT updfake)
+    if (!r || !r.ok || !r.hasUpdate) return;
+    const fresh = !found || found.latest !== r.latest;
+    found = r;
+    btn.classList.add('has-update');
+    if (fresh) btn.classList.remove('seen');
+    btn.title = T`มีเวอร์ชันใหม่ v${r.latest} — กดเพื่ออัปเดต`;
+    chipOut(r);
+  };
+  setTimeout(check, 4000);
+  setInterval(check, 6 * 3600e3);
+  btn.addEventListener('click', () => {
+    if (!found) return;
+    try { localStorage.setItem(SEEN, found.latest); } catch {}
+    btn.classList.add('seen');
+    document.querySelector('.upd-chip')?.classList.remove('show');
+    const t0 = performance.now();
+    const go = () => { const c = document.getElementById('about-check'); if (c && !c.disabled && c.isConnected) c.click(); else if (performance.now() - t0 < 2500) requestAnimationFrame(go); };
+    requestAnimationFrame(go);
+  });
+}
+/* <<< prism-update-nudge */

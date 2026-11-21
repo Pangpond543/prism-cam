@@ -1,5 +1,6 @@
-// "Hand" tab: tracking switch and status, things that ride the hand, gesture → command bindings, custom poses,
-// and the PC-control switches (arm, hand mouse).
+// "Tracking" tab (id 'hand'): hand tracking switch and status, face tracking settings (GPU / CPU, smoothing,
+// sensitivity, preview mesh, swapped eyes, fit to your face), custom poses, things that ride the hand,
+// gesture → command bindings, and the PC-control switches (arm, hand mouse). Every section folds (remembered).
 import { api, native, bus, T, toast, htmlBox, promptBox, confirmBox, ctxMenu, esc, $ } from './core.js';
 import { icon } from './icons.js';
 import { hands, gestureList, gestureName, gestureEmoji, retryHands, pairList } from './hands.js';
@@ -8,6 +9,8 @@ import { store, prof, loadProfiles, saveProfiles, newProfile, setActive, removeP
 import { runWizard, report, teachList, pairTeachList, quickFix } from './handtrain.js';
 import { studio } from './studio.js';
 import { ANIM_VERBS } from './anim-core.js';
+import { faceExprList, FACE_ZONES, faceZoneName } from './facedefs.js';
+import { facePerson, saveFacePerson, calibrateFace, cancelFaceCalib, clearFaceCalib } from './face.js';
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 const H = () => studio.hand();
@@ -19,6 +22,7 @@ export const appCmds = () => [
   ...studio.scenes().map((s, i) => ['scene:' + i, T`ไปซีน “${s.name}”`]),
   ['snap', T`ถ่ายภาพนิ่ง`], ['rec', T`เริ่ม / หยุดอัดวิดีโอ`], ['vcam', T`เปิด / ปิดกล้องเสมือน`],
   ['mouse', T`เปิด / ปิดโหมดเมาส์`], ['fx-clear', T`ล้างภาพวาดกลางอากาศ`], ['arm-off', T`หยุดควบคุมเครื่อง`],
+  ['face-next', T`สลับของติดหน้าชิ้นถัดไป`], ['face-prev', T`สลับของติดหน้าชิ้นก่อนหน้า`],
   ...studio.allLayers().map((l) => ['layer:' + l.id, T`ซ่อน / แสดงเลเยอร์ “${l.name}”`]),
   ...studio.allLayers().flatMap((l) => [['layer-show:' + l.id, T`แสดงเลเยอร์ “${l.name}”`], ['layer-hide:' + l.id, T`ซ่อนเลเยอร์ “${l.name}”`]]),
   ...studio.allLayers().filter((l) => l.type === 'area' && l.slides && l.slides.on).flatMap((l) => [['slide-next:' + l.id, T`สไลด์ถัดไปใน “${l.name}”`], ['slide-prev:' + l.id, T`สไลด์ก่อนหน้าใน “${l.name}”`]]),
@@ -38,7 +42,8 @@ export function actionLabel(a) {
   return '';
 }
 const needsArm = (a) => a && a.type !== 'app';
-const allGestures = () => [...gestureList().map((g) => [g[0], `${g[1]} ${g[2]}`]), ...customList().map((p) => ['c:' + p.id, '⭐ ' + p.name]), ...pairList().map((g) => [g, gestureName(g)])];
+const bindWhere = (b) => (b.gesture.startsWith('f:') || b.gesture.startsWith('swipe') ? '' : (b.hand === 'both' ? ' · ' + T`สองมือ` : '') + (b.near ? ' · ' + faceZoneName(b.near) : ''));
+const allGestures = () => [...gestureList().map((g) => [g[0], `${g[1]} ${g[2]}`]), ...customList().map((p) => ['c:' + p.id, '⭐ ' + p.name]), ...pairList().map((g) => [g, gestureName(g)]), ...faceExprList().map((g) => [g[0], `${g[1]} ${g[2]}`])];
 
 // keyboard event → "ctrl+shift+a"
 const CODE = { Enter: 'enter', NumpadEnter: 'enter', Escape: 'esc', Space: 'space', Tab: 'tab', Backspace: 'backspace', Delete: 'delete', Insert: 'insert', Home: 'home', End: 'end', PageUp: 'pageup', PageDown: 'pagedown', ArrowLeft: 'left', ArrowUp: 'up', ArrowRight: 'right', ArrowDown: 'down', PrintScreen: 'printscreen', Minus: 'minus', Equal: 'plus', Comma: 'comma', Period: 'period', CapsLock: 'capslock', Pause: 'pause' };
@@ -52,10 +57,18 @@ export function comboOf(e) {
 
 /* ------------------------------------------------------------ small builders */
 const el = (tag, cls, html) => { const d = document.createElement(tag); if (cls) d.className = cls; if (html !== undefined) d.innerHTML = html; return d; };
-function sec(root, ico, title, toggle) {
-  const s = el('div', 'sec', `<h4>${icon(ico)}<span>${esc(title)}</span>${toggle ? '<label><input type="checkbox"></label>' : ''}</h4>`);
+// folded sections are remembered on this PC (not in the project)
+const FKEY = 'prismcam.trackFold';
+let shut = new Set(); try { shut = new Set(JSON.parse(localStorage.getItem(FKEY) || '[]')); } catch { /* */ }
+function sec(root, ico, title, toggle, key) {
+  const s = el('div', 'sec' + (key ? ' fold' : '') + (key && shut.has(key) ? ' shut' : ''), `<h4>${icon(ico)}<span>${esc(title)}</span>${toggle ? '<label><input type="checkbox"></label>' : ''}${key ? `<i class="fold-i">${icon('chev')}</i>` : ''}</h4>`);
   root.appendChild(s);
   if (toggle) { const cb = s.querySelector('input'); cb.checked = toggle.get(); cb.onchange = () => toggle.set(cb.checked); }
+  if (key) s.querySelector('h4').onclick = (e) => {
+    if (e.target.closest('input, button, label')) return;
+    s.classList.toggle('shut'); if (s.classList.contains('shut')) shut.add(key); else shut.delete(key);
+    try { localStorage.setItem(FKEY, JSON.stringify([...shut])); } catch { /* */ }
+  };
   return s;
 }
 function slider(parent, label, obj, key, min, max, step, fmt, done) {
@@ -89,14 +102,21 @@ function statusText() {
   const live = hands.tracks.map((t) => `${t.side === 'R' ? T`ขวา` : T`ซ้าย`}${t.g ? ' ' + gestureEmoji(t.g) : ''}`).join(' · ');
   return `${hands.delegate} · ${hands.fps} ${T`ครั้ง/วินาที`} · ${Math.round(hands.ms)} ms` + (live ? ` · ${live}` : ` · ${T`ยังไม่เห็นมือ`}`);
 }
-setInterval(() => { if (statusEl && statusEl.isConnected) statusEl.textContent = statusText(); }, 300);
+let faceStEl = null, faceUseShown = null;
+setInterval(() => {
+  if (statusEl && statusEl.isConnected) statusEl.textContent = statusText();
+  if (faceStEl && faceStEl.isConnected) {
+    faceStEl.textContent = studio.faceStatusLong();
+    if (faceUseShown !== studio.faceInUse()) renderHand(); // something in the scene started / stopped using the face
+  }
+}, 300);
 
 export function renderHand() {
   const root = $('tab-hand'), h = H(), keep = $('panel-body').scrollTop;
   root.innerHTML = '';
 
   /* tracking */
-  const tk = sec(root, 'hand', T`การจับมือ`, { get: () => h.on, set: (v) => { h.on = v; if (!v && ctl.mouse) setMouse(false); changed(); renderHand(); } });
+  const tk = sec(root, 'hand', T`การจับมือ`, { get: () => h.on, set: (v) => { h.on = v; if (!v && ctl.mouse) setMouse(false); changed(); renderHand(); } }, 'hand');
   statusEl = el('div', 'hand-status', esc(statusText())); tk.appendChild(statusEl);
   if (h.on) {
     if (hands.state === 'failed') chips(tk, [[T`ลองใหม่`, () => { retryHands(); renderHand(); }, false, 'refresh']]).style.margin = '6px 0';
@@ -115,11 +135,14 @@ export function renderHand() {
     note(tk, T`ความนิ่งสูง = มือไม่สั่นแต่ตามช้าลงเล็กน้อย · ชดเชยหน่วง = ให้ของที่ติดมือเกาะมือสนิทขณะขยับเร็ว · โครงมือในพรีวิวไม่ถูกส่งออกกล้องเสมือน`);
   }
 
+  /* face tracking */
+  renderFace(root);
+
   /* teach the gestures to this person's hands */
   renderTeach(root);
 
   /* things that ride the hand */
-  const at = sec(root, 'sparkle', T`ของลอยตามมือ`);
+  const at = sec(root, 'sparkle', T`ของลอยตามมือ`, null, 'ride');
   chips(at, [
     [T`เอฟเฟกต์มือ`, () => { studio.addHandFx(); renderHand(); }, false, 'wand'],
     [T`ข้อความติดมือ`, () => { studio.addHandText(T`สวัสดี!`); renderHand(); }, false, 'text'],
@@ -128,10 +151,10 @@ export function renderHand() {
   note(at, T`เลเยอร์ใดก็ติดมือได้ — เลือกเลเยอร์ แล้วเปิด “ติดตามมือ” ในแท็บปรับแต่ง (เลือกจุดบนมือ หมุน/ย่อขยายตามมือ หรือให้โผล่เฉพาะตอนทำท่าที่กำหนด)`);
 
   /* gesture → command */
-  const bd = sec(root, 'sliders', T`ท่ามือ → คำสั่ง`);
+  const bd = sec(root, 'sliders', T`ท่ามือ / สีหน้า → คำสั่ง`, null, 'binds');
   if (!h.binds.length) note(bd, T`ยังไม่มีคำสั่ง — ผูกท่ามือกับคีย์ลัด มาโคร การเปิดโปรแกรม หรือคำสั่งใน Prism Cam`).style.padding = '0 2px 8px';
   for (const b of h.binds) {
-    const row = el('div', 'bind' + (b.on ? '' : ' off'), `<span class="b-emo">${esc(gestureEmoji(b.gesture) || '❔')}</span><span class="b-main"><b>${esc(gestureName(b.gesture).replace(/^\S+\s/, ''))}</b><small>${esc(actionLabel(b.action))}${needsArm(b.action) ? ' <i class="b-pc">PC</i>' : ''}</small></span><input type="checkbox" title="${T`เปิด / ปิดคำสั่งนี้`}"><button class="icon-btn" title="${T`ลบ`}">${icon('x')}</button>`);
+    const row = el('div', 'bind' + (b.on ? '' : ' off'), `<span class="b-emo">${esc(gestureEmoji(b.gesture) || '❔')}</span><span class="b-main"><b>${esc(gestureName(b.gesture).replace(/^\S+\s/, '') + bindWhere(b))}</b><small>${esc(actionLabel(b.action))}${needsArm(b.action) ? ' <i class="b-pc">PC</i>' : ''}</small></span><input type="checkbox" title="${T`เปิด / ปิดคำสั่งนี้`}"><button class="icon-btn" title="${T`ลบ`}">${icon('x')}</button>`);
     row.dataset.id = b.id;
     const cb = row.querySelector('input'); cb.checked = b.on;
     cb.onchange = () => { b.on = cb.checked; changed(); row.classList.toggle('off', !b.on); };
@@ -146,7 +169,7 @@ export function renderHand() {
 
 
   /* control this PC */
-  const pc = sec(root, 'shield', T`ควบคุมเครื่องนี้`, { get: () => ctl.armed, set: async (v) => { await setArmed(v); renderHand(); } });
+  const pc = sec(root, 'shield', T`ควบคุมเครื่องนี้`, { get: () => ctl.armed, set: async (v) => { await setArmed(v); renderHand(); } }, 'pc');
   note(pc, ctl.armed
     ? T`<b>เปิดอยู่</b> — ท่ามือสั่งคีย์บอร์ดและเมาส์ของเครื่องนี้ได้ · กด <kbd>Ctrl+Shift+F12</kbd> เพื่อหยุดทันทีจากทุกโปรแกรม`
     : T`ปิดอยู่ — คำสั่งที่กดคีย์ คลิกเมาส์ หรือเปิดโปรแกรมจะยังไม่ทำงาน (ต้องเปิดใหม่ทุกครั้งที่เริ่มโปรแกรม เพื่อความปลอดภัย)`).style.padding = '0 2px 6px';
@@ -189,7 +212,7 @@ function addSamples() {
 let teachOpen = false;
 function renderTeach(root) {
   const p = prof();
-  const s = sec(root, 'wand', T`ปรับให้เข้ากับมือคุณ`, { get: () => p.on, set: (v) => { p.on = v; saveProfiles(); setActive(p.id); renderHand(); } });
+  const s = sec(root, 'wand', T`ปรับให้เข้ากับมือคุณ`, { get: () => p.on, set: (v) => { p.on = v; saveProfiles(); setActive(p.id); renderHand(); } }, 'teach');
   const head = el('div', 'rowf', `<span>${T`โปรไฟล์`}</span>`);
   const sel = el('label', 'field', `<select>${store.profiles.map((x) => `<option value="${esc(x.id)}">${esc(x.name)}</option>`).join('')}</select>`);
   const se = sel.querySelector('select'); se.value = p.id; se.onchange = () => { setActive(se.value); renderHand(); studio.refreshProps(); };
@@ -264,6 +287,58 @@ function doImport() {
   inp.click();
 }
 
+/* ------------------------------------------------------------ face tracking */
+// runs by itself whenever the scene uses the face — so this section has no on/off switch, only how it tracks
+function renderFace(root) {
+  const c = studio.faceCfg(), used = studio.faceInUse(), set = (patch) => { Object.assign(c, patch); studio.applyFaceCfg(); studio.touch(); renderHand(); };
+  faceUseShown = used;
+  const fk = sec(root, 'face', T`การจับใบหน้า`, null, 'face');
+  faceStEl = el('div', 'hand-status', esc(studio.faceStatusLong())); fk.appendChild(faceStEl);
+  if (!used) {
+    chips(fk, [[T`เลือกของติดหน้า / ลาย / VTuber…`, () => studio.openFacePicker(), false, 'face']]).style.marginTop = '6px';
+    return;
+  }
+  chips(fk, [
+    [T`1 หน้า`, () => set({ faces: 1 }), c.faces === 1], [T`หลายหน้า`, () => set({ faces: 4 }), c.faces > 1],
+    ['GPU', () => set({ gpu: true }), c.gpu !== false], ['CPU', () => set({ gpu: false }), c.gpu === false],
+  ], 'grid4').style.margin = '8px 0 6px';
+  const done = () => studio.applyFaceCfg();
+  slider(fk, T`ความนิ่ง`, c, 'smooth', 0, 100, 5, (v) => v + '%', done);
+  slider(fk, T`ชดเชยหน่วง`, c, 'predict', 0, 100, 5, (v) => v + '%', done);
+  slider(fk, T`ความไวสีหน้า`, c, 'sens', 0, 100, 5, (v) => v + '%', done);
+  chips(fk, [
+    [T`ตาข่ายหน้าในพรีวิว`, () => set({ mesh: !c.mesh }), !!c.mesh],
+    [T`สลับตาซ้าย-ขวา`, () => { facePerson.swap = !facePerson.swap; saveFacePerson(); renderHand(); toast(facePerson.swap ? T`สลับตาซ้าย-ขวาแล้ว — ลองขยิบตาดูอีกครั้ง` : T`ใช้ตาซ้าย-ขวาตามที่ระบบหาเอง`); }, !!facePerson.swap],
+  ]).style.marginTop = '6px';
+  const cal = facePerson.calib;
+  chips(fk, [
+    [cal ? T`ปรับให้เข้ากับหน้าคุณใหม่` : T`ปรับให้เข้ากับหน้าคุณ`, () => calibrate(), !cal, 'wand'],
+    cal && [T`ล้างค่าที่ปรับ`, () => { clearFaceCalib(); renderHand(); toast(T`ล้างค่าที่ปรับแล้ว — กลับไปใช้ค่ากลาง`); }],
+  ]).style.marginTop = '6px';
+  note(fk, (cal ? T`ปรับแล้ว — หน้าเฉย ๆ ของคุณคือจุดเริ่ม` : T`ยังไม่ได้ปรับ — ถ้าหน้าปกติก็ขึ้นว่ายิ้ม หรือก้มหน้า ให้กด “ปรับให้เข้ากับหน้าคุณ”`) + ' · ' + T`ตาข่ายหน้าไม่ถูกส่งออกกล้องเสมือน · ขยิบตาแล้วจับกลับข้าง = กด “สลับตาซ้าย-ขวา”`);
+}
+// look at the camera with a resting face for 3 s → that face becomes the zero point of every expression
+export async function calibrate() {
+  studio.setFacePreview(true); // keeps the face model running while this window is open
+  let result = null;
+  await htmlBox(`<h3>${T`ปรับให้เข้ากับหน้าคุณ`}</h3>
+    <p>${T`มองเข้ากล้องตรง ๆ ทำหน้าเฉย ๆ แบบปกติ (ไม่ยิ้ม ปากปิด) ค้างไว้ 3 วินาที — ให้มีคนเดียวในภาพ`}</p>
+    <div class="cal-bar"><i></i></div><p class="cal-st" data-st>${T`กำลังรอเห็นหน้า…`}</p>
+    <div class="modal-btns"><button class="pill-btn" data-x>${T`ยกเลิก`}</button></div>`,
+  (m, close) => {
+    const bar = m.querySelector('.cal-bar i'), st = m.querySelector('[data-st]');
+    m.querySelector('[data-x]').onclick = () => { cancelFaceCalib(); close(null); };
+    calibrateFace(3000, (p, seen) => {
+      bar.style.width = Math.round(p * 100) + '%';
+      st.textContent = seen ? T`ดีมาก ค้างไว้… ${Math.ceil(3 - p * 3)}` : T`ต้องเห็นหน้าเดียวในภาพ — มองเข้ากล้อง`;
+    }).then((r) => { result = r; if (bar.isConnected && r.n !== -1) close(r); });
+  });
+  cancelFaceCalib(); studio.setFacePreview(false);
+  if (result && result.ok) toast(T`ปรับให้เข้ากับหน้าคุณแล้ว`);
+  else if (result && result.n !== -1) toast(T`ยังไม่เห็นหน้าชัดพอ — ลองอีกครั้งในที่สว่าง`, { kind: 'err' });
+  renderHand();
+}
+
 /* ------------------------------------------------------ skeleton toggle on stage */
 function skeletonMenu(x, y) {
   const h = H(), fx = studio.allLayers().find((l) => l.type === 'handfx');
@@ -285,7 +360,9 @@ export function editBind(orig, preset) {
   htmlBox(`<h3>${orig ? T`แก้ไขคำสั่ง` : T`เพิ่มคำสั่ง`}</h3>
     <div class="bind-form wide">
       <div class="rowf"><span>${T`ท่ามือ`}</span><label class="field"><select data-f="gesture">${opt(allGestures(), b.gesture)}</select></label></div>
-      <div class="rowf"><span>${T`มือ`}</span><label class="field"><select data-f="hand">${opt([['any', T`มือไหนก็ได้`], ['right', T`มือขวา`], ['left', T`มือซ้าย`]], b.hand)}</select></label></div>
+      <div class="rowf" data-handrow><span>${T`มือ`}</span><label class="field"><select data-f="hand">${opt([['any', T`มือไหนก็ได้`], ['right', T`มือขวา`], ['left', T`มือซ้าย`], ['both', T`ทั้งสองมือ (ท่าเดียวกัน)`]], b.hand)}</select></label></div>
+      <div class="rowf" data-nearrow><span>${T`ตำแหน่งมือ`}</span><label class="field"><select data-f="near">${opt(FACE_ZONES(), b.near || '')}</select></label></div>
+      <div class="panel-note" data-nearnote>${T`ตำแหน่งมือ = ต้องทำท่าใกล้ส่วนนั้นของหน้า (เปิดการจับใบหน้าให้เอง) · ทั้งสองมือ + ใกล้ตา = มือละข้างของตา`}</div>
       <div class="rowf" data-static><span>${T`ค้างท่า`}</span><label class="field"><select data-f="hold">${opt([['0', T`ทันที`], ['300', '0.3 s'], ['600', '0.6 s'], ['1000', '1 s'], ['1500', '1.5 s'], ['2000', '2 s']], String(b.hold))}</select></label></div>
       <div class="rowf" data-static><span>${T`การทำงาน`}</span><label class="field"><select data-f="mode">${opt([['once', T`ครั้งเดียวต่อการทำท่า`], ['repeat', T`ทำซ้ำขณะค้างท่า`], ['hold', T`ค้างไว้จนเลิกทำท่า (คีย์ / แอนิเมชัน)`]], b.mode)}</select></label></div>
       <div class="rowf"><span>${T`คำสั่ง`}</span><label class="field"><select data-f="type">${opt(actTypes(), b.action.type)}</select></label></div>
@@ -328,8 +405,12 @@ export function editBind(orig, preset) {
       if (needsArm(a)) { const n = el('div', 'panel-note', T`คำสั่งนี้สั่งงานเครื่อง จึงทำงานเฉพาะเมื่อเปิดสวิตช์ “ควบคุมเครื่องนี้”`); params.appendChild(n); }
     };
     const sync = () => {
-      const sw = b.gesture.startsWith('swipe');
+      const sw = b.gesture.startsWith('swipe'), fc = b.gesture.startsWith('f:'), pair = b.gesture.startsWith('pair:');
       m.querySelectorAll('[data-static]').forEach((r) => { r.style.display = sw ? 'none' : ''; });
+      q('[data-handrow]').style.display = fc || pair ? 'none' : '';
+      q('[data-nearrow]').style.display = q('[data-nearnote]').style.display = fc || sw ? 'none' : '';
+      q('[data-f=hand] option[value=both]').disabled = sw;
+      if (sw && b.hand === 'both') { b.hand = 'any'; q('[data-f=hand]').value = 'any'; }
       const mode = q('[data-f=mode]');
       const anim = b.action.type === 'app' && String(b.action.cmd || '').startsWith('anim:');
       mode.querySelector('option[value=hold]').disabled = b.action.type !== 'key' && !anim;
@@ -338,6 +419,7 @@ export function editBind(orig, preset) {
     };
     q('[data-f=gesture]').onchange = (e) => { b.gesture = e.target.value; sync(); };
     q('[data-f=hand]').onchange = (e) => { b.hand = e.target.value; };
+    q('[data-f=near]').onchange = (e) => { b.near = e.target.value; if (!b.near) delete b.near; };
     q('[data-f=hold]').onchange = (e) => { b.hold = +e.target.value; };
     q('[data-f=mode]').onchange = (e) => { b.mode = e.target.value; };
     q('[data-f=type]').onchange = (e) => { b.action = { type: e.target.value }; drawParams(); sync(); };
@@ -360,6 +442,7 @@ export function editBind(orig, preset) {
 /* ------------------------------------------------------------------- boot */
 export async function startHandUi() {
   bus.on('hand:edit-bind', (preset) => editBind(null, preset));
+  bus.on('hand:edit-bind-id', (id) => { const b = H().binds.find((x) => x.id === id); if (b) editBind(b); });
   await loadProfiles();
   // poses saved by the first version (one snapshot each, inside the project) move into the profile as named poses
   const old = H().poses || [];

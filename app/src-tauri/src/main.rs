@@ -79,6 +79,11 @@ fn update_apply(app: AppHandle) -> Value {
     let c = update::check(&repo(), env!("CARGO_PKG_VERSION"));
     if c["ok"] != true { return c; }
     if c["hasUpdate"] != true { return json!({ "ok": false, "reason": "uptodate" }); }
+    // a source checkout under git (the author's own copy, opened from app\bin): replacing the source with the release
+    // would wipe changes that are not released yet → never do that from inside the app
+    if app_dir().join("src-tauri").exists() && app_dir().parent().is_some_and(|p| p.join(".git").exists()) {
+        return json!({ "ok": false, "reason": "git" });
+    }
     vcam_host::stop();
     if !app_dir().join("src-tauri").exists() { // packaged (installer / portable): use the files on the GitHub release
         let (r, setup) = update::apply_release(&c, &exe_dir(), &|step| { let _ = app.emit("update:step", json!({ "step": step, "f": 0 })); });
@@ -91,31 +96,44 @@ fn update_apply(app: AppHandle) -> Value {
 
 /* ------------------------------------------------------------------ project */
 fn data_dir(app: &AppHandle) -> PathBuf { app.path().app_data_dir().unwrap_or_else(|_| std::env::temp_dir().join("PrismCam")) }
-#[tauri::command(async)]
-fn project_load(app: AppHandle) -> Value {
-    match std::fs::read_to_string(data_dir(&app).join("project.json")) { Ok(data) => json!({ "ok": true, "data": data }), Err(_) => json!({ "ok": false }) }
+/// Saved JSON (project / hand poses). A file that can't be read or isn't valid JSON is moved aside
+/// (`<name>.broken-<time>.json`, never deleted) and the previous save (`<name>.bak`) is used instead — the studio used to
+/// start empty and its next save overwrote the user's work for good.
+fn json_load(app: &AppHandle, name: &str) -> Value {
+    let dir = data_dir(app);
+    let (main, bak) = (dir.join(format!("{name}.json")), dir.join(format!("{name}.bak")));
+    let good = |p: &PathBuf| std::fs::read_to_string(p).ok().filter(|s| serde_json::from_str::<serde::de::IgnoredAny>(s).is_ok());
+    if let Some(data) = good(&main) { return json!({ "ok": true, "data": data }); }
+    let broken = main.exists();
+    if broken {
+        let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+        let aside = dir.join(format!("{name}.broken-{t}.json"));
+        let moved = std::fs::rename(&main, &aside).is_ok();
+        log_line(&format!("LOAD {name}.json unreadable → moved aside={moved} ({})", aside.display()));
+    }
+    match good(&bak) {
+        Some(data) => { log_line(&format!("LOAD {name}: using the previous save ({name}.bak)")); json!({ "ok": true, "data": data, "restored": true }) }
+        None => json!({ "ok": false, "broken": broken }),
+    }
+}
+fn json_save(app: &AppHandle, name: &str, data: String) -> Value {
+    let dir = data_dir(app);
+    let (main, bak, tmp) = (dir.join(format!("{name}.json")), dir.join(format!("{name}.bak")), dir.join(format!("{name}.json.tmp")));
+    if std::fs::create_dir_all(&dir).is_err() || std::fs::write(&tmp, data).is_err() { return json!({ "ok": false }); }
+    if main.exists() { let _ = std::fs::rename(&main, &bak); } // keep the previous save (load falls back to it)
+    json!({ "ok": std::fs::rename(&tmp, &main).is_ok() })
 }
 #[tauri::command(async)]
-fn project_save(app: AppHandle, a: String) -> Value {
-    let dir = data_dir(&app);
-    let tmp = dir.join("project.json.tmp");
-    let ok = std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&tmp, a).is_ok() && std::fs::rename(&tmp, dir.join("project.json")).is_ok();
-    json!({ "ok": ok })
-}
+fn project_load(app: AppHandle) -> Value { json_load(&app, "project") }
+#[tauri::command(async)]
+fn project_save(app: AppHandle, a: String) -> Value { json_save(&app, "project", a) }
 
 /* ------------------------------------------------------------- hand profiles */
 // the user's taught gestures live next to the project but apart from it: they belong to the person, not the scene
 #[tauri::command(async)]
-fn hand_load(app: AppHandle) -> Value {
-    match std::fs::read_to_string(data_dir(&app).join("hands.json")) { Ok(data) => json!({ "ok": true, "data": data }), Err(_) => json!({ "ok": false }) }
-}
+fn hand_load(app: AppHandle) -> Value { json_load(&app, "hands") }
 #[tauri::command(async)]
-fn hand_save(app: AppHandle, a: String) -> Value {
-    let dir = data_dir(&app);
-    let tmp = dir.join("hands.json.tmp");
-    let ok = std::fs::create_dir_all(&dir).is_ok() && std::fs::write(&tmp, a).is_ok() && std::fs::rename(&tmp, dir.join("hands.json")).is_ok();
-    json!({ "ok": ok })
-}
+fn hand_save(app: AppHandle, a: String) -> Value { json_save(&app, "hands", a) }
 #[tauri::command(async)]
 fn hand_export(app: AppHandle, a: Value) -> Value {
     let name: String = a["name"].as_str().unwrap_or("").chars().filter(|c| c.is_alphanumeric() || " -_".contains(*c)).take(40).collect();
@@ -281,7 +299,21 @@ fn main() {
             }
             Ok(())
         })
-        .on_window_event(|_w, e| { if let tauri::WindowEvent::Destroyed = e { input::release_all(); vcam_host::stop(); } })
+        .on_window_event(|w, e| match e {
+            // Alt+F4 / taskbar "Close window": let the page save and release the cameras first (same path as the ✕ button);
+            // if it doesn't answer within 4 s, close anyway
+            tauri::WindowEvent::CloseRequested { api, .. } => {
+                static ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !ASKED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                    api.prevent_close();
+                    let _ = w.emit("app:close", json!({}));
+                    let app = w.app_handle().clone();
+                    std::thread::spawn(move || { std::thread::sleep(std::time::Duration::from_secs(4)); input::release_all(); vcam_host::stop(); app.exit(0); });
+                }
+            }
+            tauri::WindowEvent::Destroyed => { input::release_all(); vcam_host::stop(); }
+            _ => {}
+        })
         .run(tauri::generate_context!())
         .expect("error while running Prism Cam");
 }

@@ -17,7 +17,7 @@
 - **Recording at 60 fps came out ~50 fps** → `canvas.captureStream(fps)` samples on screen refresh, and the draw timer drifts against it. → `captureStream(0)` + `track.requestFrame()` after each draw. Not an encoder limit (VP9 / VP8 / H.264 all gave the same 50–52).
 - **Virtual camera at 60 fps** → not done on purpose: Discord takes 30 from a camera, and changing the DLL forces every user to reinstall the camera (UAC). The app sends ≤ 30 to it.
 - **AI "remove background" sends a black picture** → nobody is in front of the camera (the model finds no person). Not a bug; test with a person or with "blur".
-- **MediaPipe worker fails to load** → hand worker must stay a CLASSIC worker (MediaPipe uses importScripts) and CSP needs `wasm-unsafe-eval` + `worker-src blob:`.
+- **MediaPipe worker fails to load** → the AI worker (`ai-worker.js`) must stay a CLASSIC worker (MediaPipe uses importScripts) and CSP needs `wasm-unsafe-eval` + `worker-src blob:`.
 
 
 ## Undo history keeps layers, not pictures (2026-11-16)
@@ -55,3 +55,20 @@ The panels' number boxes are `type=text`. After a click they keep focus and Ctrl
 - **Installed vs portable is decided by `uninstall.exe` next to the exe.** Keep `installer.nsi` and `update::UNINSTALLER` in step.
 - **Default hand poses are the author's data** — regenerate `default-hands.json` only from the user's real `hands.json` (schtasks copy), built-in pose ids only (skip `c:` / `pair:c:`), never the mouse calibration.
 - Testing the installer from Claude's shell kills a running Prism Cam (`taskkill` inside the installer) — ask first. Install with `/S /D=<test dir>` via PowerShell `Start-Process` (Git Bash mangles `/S`).
+- **i18n audit says 0 missing but English shows Thai (2026-11-20)** → `tools/i18n-audit.js` loses its place inside some template literals (see its "plain string" list) and silently skips every `T\`…\`` after that point in the file — ~45 hand-panel strings had no English. → Also scan the files you touched with a straight `T\`` key scan (keys with `{}` for `${…}`), or fix the audit's parser.
+- **Face: which eye is which** → MediaPipe's `eyeBlinkLeft/Right` side is not reliable to reason about; `face.js` learns it from the eyelid gap of the picture-left / right eye (`tr.corr`). Winks (`f:winkL/R`) are the PERSON's eyes; avatar eyes and `eyeL/eyeR` are the STAGE's left / right (mirror-consistent with how the camera layer is shown).
+- **A model switched off while loading** (e.g. `clear`, or hand tracking off during start-up) used to come back as "failed" forever → the worker must check after every await that its load still owns `M[name]`; the manager ignores `fail` for a model that is `off`.
+- **Testing face features without a webcam** (never film the user — LESSONS #4): browser preview `npm run web` + `?act=…` (same hooks as `PRISM_ACT`), put a test photo next to the page only temporarily (the renderer is embedded in the exe!); in the exe use `imgb64:<base64 jpeg>` (≤ ~25 KB fits the env var) — `%USERPROFILE%\PrismCamBuild\test\run.ps1` does it and captures only our window (PrintWindow).
+- **Face sticker stuck at a strange size** → it waits for a face to fit (`face.fit`); with no face it keeps its add-time size. "Fit to face" re-fits.
+- **Face calibration vs stickers (2026-11-20)** → the calibrated head angle (`F.yaw/pitch`) must NOT drive the sticker squash — a camera off to the side really sees a turned face. Stickers use `F.ryaw/rpitch`. Test hooks `facecal` / `faceswap` / `faceset:` change per-PC state → finish with `facecalclear` (and `faceset:mesh=false,faceset:gpu=true`).
+- **GPU ↔ CPU switch of a running model** → the worker rebuilds and posts `ready` again while ai.js already says `ready`; ai.js must accept it, or the status keeps the old delegate.
+- **Testing gestures without real hands (2026-11-20)** → browser preview: push fake tracks `{ id, g: 'pinch', gSince, seen, side, palm, p, lm, w, … , fake: true }` into `hands.tracks` and refresh `seen` every 30 ms (see changelog "Gestures at the face"); exe: `nearsim` checks the zone geometry, `wearbind` / `weartoggle` the preset and the slide, `unbindnear` cleans up. The release build command kills any running `prism-cam.exe` — if the user has it open, tell them.
+
+## Bug hunt 2026-11-20
+- **Saves must never be overwritten after a failed load** → the old `load()` fell back to an empty project and the next `save()` replaced the file. Keep the unreadable file aside + `.bak`.
+- **Closing from outside the ✕ button** (Alt+F4, taskbar, WM_CLOSE) used to skip save / camera release → `CloseRequested` is intercepted in main.rs and routed to the page (`app:close`).
+- **Test hooks that open the real camera** (`camera`, `camcycle`) also save a camera layer into the user's real project → back up `%APPDATA%\com.prism.cam\project.json` first and restore it after (`PrismCamBuild\test\vbackup`).
+- **Auto-update inside the author's git checkout** is refused on purpose (`git` reason) — it would overwrite unreleased source.
+- New hooks: `camlost`, `devchange`, `camlog`, `camcycle:<n>`.
+
+- **Changed icon not in the exe** (2026-11-21): tauri-build does not rerun when `icons/icon.ico` changes → `touch app/src-tauri/build.rs` before building. Icons come from `../tools/brand` (see `../docs/brand.md`).

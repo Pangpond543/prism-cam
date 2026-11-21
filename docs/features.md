@@ -22,11 +22,28 @@ Webcams (USB auto-picked by test hook), screen / window capture, images (file, d
 - Gesture commands per area: `layer:` toggle, `layer-show:`, `layer-hide:`, play the area clip; area panel opens the bind editor (`hand:edit-bind`).
 - Imported videos are copied to `<app data>/media/<id>.<ext>` (`media_put`) and reopened from `http://pmedia.localhost/` with byte ranges; unused files are removed on the next start (`media_gc`).
 
+## Face (`face.js`, `facedefs.js`, `facepack.js`, `facepaint.js`, `avatar.js`; picker `openFacePicker` in studio.js)
+- MediaPipe face landmarker in the shared AI worker (up to 4 faces, `project.face` = { faces, smooth, predict, sens }). Runs only while something in the scene uses the face (`faceUsed`: face-attached layer, face paint, avatar, face drive, `f:` binding / pose filter, picker open). Source = the same layer the hands use (`handSource`, hidden layers still work).
+- `sceneFaces` (per frame, stage pixels): `p` 478 points, `z`, `w`/`h`, `roll` (eye line), `yaw` (> 0 = nose to the stage's right) / `pitch` (> 0 = up) from mesh depth, `eyeL`/`eyeR` closedness of the stage-left / right eye (MediaPipe's eye blendshape sides are decided from the eyelid gap, `tr.corr`), `mouth`, `smile`, `brow`, `kiss`, `puff`, gaze `gx`/`gy`, `nx`/`ny` (−1…1 position).
+- **Tracking tab** (`handui.js` `renderFace`): face status, 1 / several faces, GPU / CPU, smoothing, lag compensation, expression sensitivity (`project.face`), preview face mesh (`project.face.mesh`, `studio.drawFaceMesh`), swap eyes + "fit to your face" (`facePerson` in `face.js`, localStorage `prismcam.face`). Folded sections: localStorage `prismcam.trackFold`.
+- Fit to your face (`calibrateFace`): one face, 3 s; averages 10 blendshapes + raw yaw / pitch. `bsv(tr, name)` = (v − rest) / (1 − rest), rest capped at 0.6. `F.yaw/pitch` = from the resting pose (expressions, avatars, drives); `F.ryaw/rpitch` = real angle (sticker squash).
+- Face gestures `f:smile f:mouth f:brow f:kiss f:puff f:eyes f:winkL f:winkR f:turnL f:turnR f:up f:down f:tiltL f:tiltR f:cover f:hush` (hysteresis 100 % on / 75 % off, sensitivity slider; eyes 400 ms, winks 130 ms). Winks = the person's own eye. Usable in bindings (hold / repeat / hold-mode), layer hand "only with pose", animation drive gate.
+- Layer `face` = { on, pt, who ('0'..'3' | 'all'), rot, scale, turn, ref, dx, dy, lost, expr, smooth, fit, ratio, dyK, cycle } (`LFACE_DEF`). `facePose` (like `handPose`): first sight or "fit to face" sets the width from `FACE_PTS` share × face width and `ref`; `turn` squashes x by cos(yaw), y by cos(pitch) (`hs.sx/sy`). Hand-follow and face-follow are exclusive. `who: 'all'` draws the layer once per face.
+- Face paint layer (`facepaint`, full stage like `handfx` — `FULLFX` set): `paint` (built-in id | 'custom' + `asset`), `color`, `who`, `op`, `blend`. Texture layout = `data/face-mesh.js` (canonical face UV + 898 triangles).
+- Avatar layer (`avatar`, a normal box): `av` = { kind cat|bot|ghost|png, color, color2, who, follow, motion, parts{slot → asset} }.
+- Bindings: `hand: 'both'` = two tracks making the same one-hand pose; `near: eyes|mouth|ears|top|cheeks|chin|face` = the pose must be made at that spot (`handsNearFace(list, zone, now)`; radii in face widths: eyes 0.5, ears 0.45, cheeks 0.38, mouth 0.45, chin 0.45, top 0.65, face 0.75; hand points = palm + thumb / index / middle tips). 1.2 s cooldown after such a binding fired. Hold ring at the face (`hands.faceHold`, `ZONE_RING`).
+- "Put on / take off with a gesture" (`wearBind`): one binding per face layer (`layer:<id>` + `near`), zone from the sticker's spot (`zoneOfPt`). Face layers toggled by `layer:` commands appear / disappear instantly (the slide-in was removed on request, 2026-11-21).
+- Commands `face-next` / `face-prev` cycle visible face layers with `cycle: true`.
+- Animation drives `fyaw fpitch froll fmouth fsmile fblink fbrow fx fy fsize` (anim-core `driveRaw` → `faceDrive`).
+
+## AI worker (`ai-worker.js`, `ai.js`)
+One classic worker holds hand / face / segmentation models (lazy, GPU → CPU fallback, closed when unused). Lanes: `track` (hand + face from one picture, ≤ 640 px) and `seg:<layer>` (256 px). One picture in flight per lane; gap = max(wanted, 1.3 × worker time) × 1.3 when auto quality stepped down. Background masks arrive asynchronously (`segFeed` / `segTake`), the newest one is used.
+
 ## Effects (`fx.js`)
 Chroma key (green screen); AI background removal / blur (MediaPipe selfie segmenter, bundled, offline).
 
-## Hands (`hands.js`, `hand-worker.js`, `handfx.js`, `handctl.js`, `handml.js`, `handtrain.js`, `handui.js`)
-- MediaPipe hand landmarker in a classic worker (GPU), One-Euro smoothing + forward prediction.
+## Hands (`hands.js`, model in `ai-worker.js`, `handfx.js`, `handctl.js`, `handml.js`, `handtrain.js`, `handui.js`)
+- MediaPipe hand landmarker in the shared AI worker (GPU), One-Euro smoothing + forward prediction.
 - Neon hand effects, air drawing, layers that ride the hand.
 - Gesture → hotkey / macro / open program / scene. Custom poses taught by the user (kNN), teaching mode (F9).
 - Hand-driven mouse / "control this PC" — only when armed; Ctrl+Shift+F12 disarms.
@@ -51,3 +68,10 @@ Windows 11 `MFCreateVirtualCamera`, no kernel driver. App writes NV12 frames to 
 
 ## Shell
 Same as Prism Size: frameless glass window, TH/EN, dark mode, ⓘ About + GitHub updater (repo `Pangpond543/prism-cam`; packaged copies update from the release Setup.exe / Portable.zip, source checkouts rebuild with cargo). The app grants its own page camera/mic permission (no WebView2 prompt).
+
+## Safety nets (2026-11-20)
+- Saved files (`project.json`, `hands.json`): a file that can't be parsed is moved to `<name>.broken-<time>.json` (never deleted); the previous save `<name>.bak` is loaded and a toast says so. Every save keeps the previous one as `.bak` (`json_load` / `json_save`, main.rs).
+- Camera unplugged → layer shows "Camera disconnected", `devicechange` reopens lost cameras by itself (`reopenCams`).
+- Alt+F4 / taskbar close = same path as the ✕ button (save, release cameras, stop virtual camera); forced after 4 s.
+- Changing the output size never restarts the virtual camera.
+- K in animation mode keys every selected layer.

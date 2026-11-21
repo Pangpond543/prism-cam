@@ -12,7 +12,8 @@ prism-cam/
     bin/                  ← what the user's shortcut runs: prism-cam.exe, prism_vcam.dll, WebView2Loader.dll
     renderer/             UI, embedded into the exe at build time (frontendDist)
       index.html, css/ (style, cam, anim, fonts), js/ (see features.md for module roles)
-      vendor/mediapipe/   vision bundle, wasm, hand_landmarker.task, selfie_segmenter.tflite
+      vendor/mediapipe/   vision bundle, wasm, hand_landmarker.task, face_landmarker.task, selfie_segmenter.tflite
+      data/face-mesh.js   canonical face UV map + triangles (face paint)
     src-tauri/
       tauri.conf.json     window + additionalBrowserArgs (WebView2 switches) + CSP
       src/main.rs         commands (names mirror Prism Size IPC: win:min → win_min), START log, camera permission

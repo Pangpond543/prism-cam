@@ -17,3 +17,21 @@ Format: `YYYY-MM-DD — idea — status (reason if given)`
 - 2026-11-18 — Virtual camera at 60 fps — ไม่เอา (Discord ได้แค่ 30)
 - 2026-11-18 — Turn hardware MJPEG / video decode back on (switches from the unconfirmed AMD theory) — ยังไม่ทำ (ไม่ได้เลือก; ทดสอบทีละ switch ตาม pitfalls)
 - 2026-11-16 — One hand drives two clips (left-right + up-down, joystick) — ยังไม่ทำ (ไม่ได้เลือก)
+- 2026-11-20 — Face tracking phase 1 (stickers on the face, fit to face, 17 built-in stickers) — ทำแล้ว
+- 2026-11-20 — Face phase 2 (face gestures → commands / drives / pose filters, swipe to switch stickers) — ทำแล้ว
+- 2026-11-20 — Face phase 3 (face paint on the mesh, 10 paints, own paint + template) — ทำแล้ว
+- 2026-11-20 — VTuber 2D built-in characters + own PNG parts — ทำแล้ว
+- 2026-11-20 — VTuber 3D (VRM via three.js) — ยังไม่ทำ (ไม่ได้เลือก; หนักกว่าสำหรับเครื่องไม่แรง)
+- 2026-11-20 — One AI worker for hands / face / background + adaptive AI rate — ทำแล้ว
+- 2026-11-20 — Rust multi-core CPU fallback — ทำแล้ว (มีอยู่แล้ว 4 แกน; ปรับให้เร็วขึ้น ~2 เท่า)
+- 2026-11-20 — Rust: raise process priority / stop Windows power throttling — ยังไม่ทำ (ไม่ได้เลือก)
+- 2026-11-20 — Run the AI models in Rust — ไม่เอา (ต้องคัดลอกภาพข้ามฝั่งทุกเฟรม ช้ากว่าเดิม)
+- 2026-11-20 — Face effects (sparkles from an open mouth, hearts when smiling, laser eyes) — ยังไม่ทำ (ไม่อยู่ในเฟสที่เลือก)
+- 2026-11-20 — Camera auto-frames the face (zoom / centre like "Center Stage") — ยังไม่ทำ
+- 2026-11-20 — Blur other people's faces (privacy) — ยังไม่ทำ
+- 2026-11-20 — Teach your own expressions (kNN like hand poses) — ยังไม่ทำ
+- 2026-11-20 — Tracking tab: face section, fit to your face, swap eyes — ทำแล้ว
+- 2026-11-20 — Live expression meter (bars: smile % / mouth % …) in the tracking tab — ยังไม่ทำ (ไม่ได้เลือก; ตาข่ายหน้าในพรีวิวบอกชื่อสีหน้าที่เห็นแทน)
+- 2026-11-20 — Separate "Face" tab — ไม่เอา (5 แท็บรกเกินไป รวมเป็นแท็บติดตาม)
+- 2026-11-20 — Hand position on the face for any gesture binding + both hands + one-click "put on / take off" — ทำแล้ว
+- 2026-11-20 — Glasses fly in from the hands' position (instead of sliding down) — ยังไม่ทำ (ทำแบบเลื่อนลงจากเหนือหัวแทน)

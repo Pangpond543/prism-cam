@@ -1,5 +1,6 @@
 // Per-layer GPU effects: chroma key, AI background removal / blur. Each processed layer owns a small WebGL canvas
 // whose output (premultiplied RGBA) is drawn into the 2D scene like any other image.
+import { needAi, aiState, onAi, feedAi } from './ai.js';
 const VS = `attribute vec2 p; varying vec2 uv; void main(){ uv = p * .5 + .5; uv.y = 1. - uv.y; gl_Position = vec4(p, 0., 1.); }`;
 const FS = `precision mediump float;
 varying vec2 uv;
@@ -89,41 +90,18 @@ export function createProc() {
 }
 
 /* ---------------------------------------------------------------- AI person segmentation (MediaPipe, bundled offline) */
-let seg = null, segLoading = null, segFailed = false, lastTs = 0;
-export const segState = () => (seg ? 'ready' : segFailed ? 'failed' : segLoading ? 'loading' : 'idle');
+// The model runs in the shared AI worker (ai.js): the studio sends a small picture now and then (segFeed) and picks up
+// the newest mask when it arrives (segTake) — the main thread never waits for the model or its GPU read-back.
+const masks = new Map(); // layer id → newest { bytes, w, h, ms }
+let segN = 0;
+onAi('seg', (r) => { r.n = ++segN; masks.set(r.id, r); }); // n: the first masks are the model's slow warm-up
+export const segState = () => { const s = aiState('seg'); return s === 'off' ? 'idle' : s; };
 export function loadSegmenter() {
-  if (seg || segFailed) return Promise.resolve(seg);
-  if (!segLoading) {
-    segLoading = (async () => {
-      try {
-        const base = new URL('../vendor/mediapipe/', import.meta.url).href;
-        const { FilesetResolver, ImageSegmenter } = await import(base + 'vision_bundle.mjs');
-        const files = await FilesetResolver.forVisionTasks(base + 'wasm');
-        const make = (delegate) => ImageSegmenter.createFromOptions(files, {
-          baseOptions: { modelAssetPath: base + 'selfie_segmenter.tflite', delegate },
-          runningMode: 'VIDEO', outputCategoryMask: false, outputConfidenceMasks: true,
-        });
-        try { seg = await make('GPU'); } catch { seg = await make('CPU'); }
-      } catch (err) { console.error('segmenter', err); segFailed = true; }
-      return seg;
-    })();
-  }
-  return segLoading;
+  needAi('seg', { gpu: true });
+  return new Promise((res) => { const t0 = performance.now(), chk = () => { const s = aiState('seg'); if (s !== 'loading' || performance.now() - t0 > 60000) res(); else setTimeout(chk, 150); }; chk(); });
 }
-// → {bytes,w,h} person-confidence mask, or null if not ready
-export function segment(src, out) {
-  if (!seg) return null;
-  const ts = Math.max(lastTs + 1, Math.round(performance.now())); lastTs = ts;
-  let res = null;
-  try {
-    seg.segmentForVideo(src, ts, (r) => {
-      const m = r.confidenceMasks && r.confidenceMasks[r.confidenceMasks.length - 1];
-      if (!m) return;
-      const f = m.getAsFloat32Array(), n = f.length;
-      const bytes = out && out.bytes && out.bytes.length === n ? out.bytes : new Uint8Array(n);
-      for (let i = 0; i < n; i++) bytes[i] = f[i] * 255;
-      res = { bytes, w: m.width, h: m.height };
-    });
-  } catch (err) { console.warn('segment', err); }
-  return res;
-}
+// keep the model open while a layer uses it (also when a still picture already has its mask)
+export const segKeep = () => needAi('seg', { gpu: true });
+// background removal for layer `id`: at most one picture in flight, about every `gap` ms (256 px wide is all the model reads)
+export const segFeed = (id, el, now, gap) => feedAi('seg:' + id, el, now, { seg: id }, { maxW: 256, gap });
+export function segTake(id) { const m = masks.get(id); if (m) masks.delete(id); return m || null; }

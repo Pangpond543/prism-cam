@@ -2,6 +2,8 @@
 // players (play / loop / ping-pong / reverse / hold-to-play / hand-driven time) and per-frame evaluation into layer overrides.
 // The compositor never sees clips: it asks AV(layer) for a cheap prototype "view" of the layer with animated values on top.
 import { T } from './i18n.js';
+import { FACE_DRIVES, isFaceDrive } from './facedefs.js';
+import { faceDrive, faceExprSince } from './face.js';
 
 export const uid = () => Math.random().toString(36).slice(2, 9);
 const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
@@ -74,7 +76,7 @@ export const PROPS = {};
 const P = (key, group, label, o = {}) => { PROPS[key] = { key, group, label, type: 'num', step: 1, ...o }; };
 export function defineProps() {
   for (const k of Object.keys(PROPS)) delete PROPS[k];
-  const notFx = (L) => L.type !== 'handfx', media = (L) => MEDIA.has(L.type), text = (L) => L.type === 'text', boxy = (L) => L.type !== 'text' && L.type !== 'handfx';
+  const notFx = (L) => L.type !== 'handfx' && L.type !== 'facepaint', media = (L) => MEDIA.has(L.type), text = (L) => L.type === 'text', boxy = (L) => L.type !== 'text' && L.type !== 'handfx';
   P('x', 'tr', 'X', { when: notFx, unit: 'px' });
   P('y', 'tr', 'Y', { when: notFx, unit: 'px' });
   P('sc', 'tr', T`สเกล`, { def: 100, min: 0, unit: '%', when: notFx });
@@ -262,12 +264,18 @@ export function advance(c, p, dt, env) {
 }
 
 /* ------------------------------------------------------- hand-driven time */
-export const DRIVES = () => [['none', T`ไม่ใช้`], ['handx', T`ตำแหน่งมือ ซ้าย ↔ ขวา`], ['handy', T`ตำแหน่งมือ ล่าง ↕ บน`], ['pinch', T`ระยะจีบ โป้ง ↔ ชี้`], ['size', T`ระยะมือใกล้ ↔ ไกลกล้อง`], ['tilt', T`การเอียงมือ`], ['spread', T`ระยะห่างสองมือ`]];
+export const DRIVES = () => [...DRIVES_H(), ...FACE_DRIVES()];
+const DRIVES_H = () => [['none', T`ไม่ใช้`], ['handx', T`ตำแหน่งมือ ซ้าย ↔ ขวา`], ['handy', T`ตำแหน่งมือ ล่าง ↕ บน`], ['pinch', T`ระยะจีบ โป้ง ↔ ชี้`], ['size', T`ระยะมือใกล้ ↔ ไกลกล้อง`], ['tilt', T`การเอียงมือ`], ['spread', T`ระยะห่างสองมือ`]];
 export function driveRaw(D, env) {
+  if (isFaceDrive(D.src)) { // the face: a face gesture can gate it ("only while smiling"), hand poses do not apply
+    if (D.gest && String(D.gest).startsWith('f:') && !faceExprSince(D.gest)) return null;
+    return faceDrive(D.src, env.out());
+  }
   const H = env.hands, o = env.out(); if (!H || !H.length) return null;
+  if (D.gest && String(D.gest).startsWith('f:') && !faceExprSince(D.gest)) return null;
   const G = D.gest || '', pairG = G.startsWith('pair:');
   if (pairG && env.pair !== G) return null; // a two-hand pose: both hands must make it
-  const okG = (x) => !G || pairG || x.g === G;
+  const okG = (x) => !G || pairG || G.startsWith('f:') || x.g === G;
   if (D.src === 'spread') { if (H.length < 2 || !okG(H[0]) || !okG(H[1])) return null; return Math.hypot(H[0].palm[0] - H[1].palm[0], H[0].palm[1] - H[1].palm[1]) / o.w; }
   let h = null; for (const x of H) { if ((D.side === 'left' && x.side !== 'L') || (D.side === 'right' && x.side !== 'R') || !okG(x)) continue; if (!h || x.tr.born < h.tr.born) h = x; }
   if (!h) return null;

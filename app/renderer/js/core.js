@@ -9,7 +9,7 @@ export { T, tr, lang };
 // (development preview) the calls fall back to harmless stubs so the UI still works.
 const TA = window.__TAURI__;
 export const native = !!TA;
-const stub = { 'about:info': { version: 'dev', repo: '', tauri: 'browser', vcam: false } };
+const stub = { 'about:info': { version: 'dev', repo: '', tauri: 'browser', vcam: false, test: new URLSearchParams(location.search).get('act') || '' } };
 export const api = {
   invoke: (ch, a) => (TA ? TA.core.invoke(ch.replace(/[:.]/g, '_'), a === undefined ? {} : { a }) : Promise.resolve(stub[ch] ?? { ok: false, reason: 'browser' })),
   raw: (cmd, bytes, headers) => (TA ? TA.core.invoke(cmd, bytes, { headers }) : Promise.resolve(null)),
@@ -41,6 +41,7 @@ export const savedTheme = () => store('prism.theme', 'light') === 'dark';
 const listeners = new Map();
 export const bus = {
   on(ev, fn) { (listeners.get(ev) || listeners.set(ev, []).get(ev)).push(fn); },
+  off(ev, fn) { const l = listeners.get(ev); if (l) { const i = l.indexOf(fn); if (i >= 0) l.splice(i, 1); } },
   emit(ev, ...a) { for (const fn of listeners.get(ev) || []) { try { fn(...a); } catch (err) { console.error(ev, err); } } },
 };
 

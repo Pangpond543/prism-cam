@@ -111,6 +111,25 @@ select option { color: #232a47; background: #fff; }
 .pick svg { width: 20px; height: 20px; color: var(--accent); flex-shrink: 0; }
 .pick b { display: block; font-weight: 600; }
 .pick small { color: var(--ink-3); }
+.modal-card.face-pick { width: min(760px, 94vw); max-height: 92vh; overflow-y: auto; padding: 22px 24px; }
+.fp-status { font-size: 12.5px; color: var(--ink-2); margin: -4px 0 10px; }
+.fp-h { margin: 12px 0 6px; font-size: 13px; font-weight: 650; color: var(--ink-2); }
+.fp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(92px, 1fr)); gap: 4px; }
+.fp-grid.av { grid-template-columns: repeat(auto-fill, minmax(124px, 1fr)); }
+.fp-item { display: flex; flex-direction: column; align-items: center; gap: 4px; padding: 8px 4px; border-radius: 14px; font-size: 11.5px; color: var(--ink-2); transition: transform .3s var(--spring), background .2s; }
+.fp-item:hover { background: rgba(255, 255, 255, .8); transform: translateY(-2px); }
+.fp-item img { width: 72px; height: 44px; object-fit: contain; }
+.fp-item canvas { width: 96px; height: 96px; }
+.fp-item span { text-align: center; line-height: 1.3; }
+.fp-item img.fp-face { width: 56px; height: 56px; }
+.fp-plus.big { width: 96px; height: 96px; font-size: 40px; border-radius: 20px; }
+.fp-dot { width: 30px; height: 30px; border-radius: 50%; box-shadow: inset 0 0 0 3px rgba(255, 255, 255, .7); margin: 7px 0; }
+.fp-plus { width: 44px; height: 44px; display: grid; place-items: center; font-size: 26px; font-weight: 400; border-radius: 12px; border: 2px dashed var(--ink-3); color: var(--ink-3); }
+.av-slot { display: flex; align-items: center; gap: 6px; }
+.av-slot img { width: 34px; height: 34px; object-fit: contain; border-radius: 8px; background: rgba(0, 0, 0, .06); }
+.face-st { padding-top: 2px; }
+html[data-theme=dark] .fp-item:hover { background: rgba(255, 255, 255, .12); }
+html[data-theme=dark] .fp-item img:not(.fp-face) { background: rgba(255, 255, 255, .72); border-radius: 10px; padding: 3px 4px; }
 .emoji-grid { display: grid; grid-template-columns: repeat(8, 1fr); gap: 4px; margin-bottom: 16px; max-height: 300px; overflow-y: auto; }
 .emoji-grid button { font-size: 26px; line-height: 1; padding: 8px 0; border-radius: 12px; transition: transform .3s var(--spring), background .2s; font-family: "Segoe UI Emoji", sans-serif; }
 .emoji-grid button:hover { background: rgba(255, 255, 255, .8); transform: scale(1.25); }
@@ -122,6 +141,9 @@ select option { color: #232a47; background: #fff; }
 #hand-note { position: absolute; left: 50%; bottom: 16px; transform: translateX(-50%); padding: 7px 16px; border-radius: 999px; font-size: 13px; font-weight: 650; color: #fff; background: rgba(14, 18, 40, .78); pointer-events: none; opacity: 0; white-space: nowrap; }
 #hand-note.show { animation: handnote 1.8s var(--ease) both; }
 @keyframes handnote { 0% { opacity: 0; transform: translate(-50%, 10px) scale(.9); } 12% { opacity: 1; transform: translate(-50%, 0) scale(1.04); } 20% { transform: translate(-50%, 0) scale(1); } 80% { opacity: 1; } 100% { opacity: 0; transform: translate(-50%, -6px); } }
+.cal-bar { height: 8px; border-radius: 99px; background: rgba(120, 130, 180, .18); overflow: hidden; margin: 12px 0 6px; }
+.cal-bar i { display: block; height: 100%; width: 0; border-radius: inherit; background: linear-gradient(90deg, #7c8cff, #ff9ec7); transition: width .2s linear; }
+.cal-st { font-size: 12.5px; color: var(--ink-2); min-height: 1.4em; }
 .hand-status { font-size: 12px; color: var(--ink-2); padding: 7px 10px; border-radius: 12px; background: rgba(255, 255, 255, .45); margin-bottom: 8px; font-variant-numeric: tabular-nums; }
 .bind { display: flex; align-items: center; gap: 9px; padding: 7px 6px 7px 8px; border-radius: 14px; cursor: pointer; transition: background .25s, transform .35s var(--spring); }
 .bind:hover { background: rgba(255, 255, 255, .55); transform: translateX(2px); }
