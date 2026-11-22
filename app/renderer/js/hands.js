@@ -85,7 +85,7 @@ function updatePair(ts) {
 
 const cfg = { hands: 2, gpu: true, smooth: 50, predict: 70, swap: false, poses: [] };
 let busy = false, nextId = 1, resN = 0, resT = 0;
-export const hands = { state: 'off', delegate: '', err: '', tracks: [], fps: 0, ms: 0, ar: 16 / 9, last: 0, training: false, pair: null };
+export const hands = { state: 'off', delegate: '', err: '', tracks: [], fps: 0, ms: 0, lat: 0, ar: 16 / 9, last: 0, training: false, pair: null };
 
 const alpha = (dt, fc) => 1 / (1 + 1 / (2 * Math.PI * fc * dt));
 const d3 = (w, a, b) => Math.hypot(w[a * 3] - w[b * 3], w[a * 3 + 1] - w[b * 3 + 1], w[a * 3 + 2] - w[b * 3 + 2]);
@@ -110,7 +110,7 @@ function syncState() {
   if (was !== hands.state) { if (hands.state === 'ready') log(`hand tracker ready (${hands.delegate})`); else if (hands.state === 'failed') log(`hand tracker FAILED ${hands.err}`); bus.emit('hand:state'); }
 }
 bus.on('ai:state', (m) => { if (m === 'hand') syncState(); });
-onAi('hand', (r, ts) => { busy = false; hands.ms += (r.ms - hands.ms) * 0.2; if (hands.state === 'ready') onResult({ ts, hands: r.hands }); });
+onAi('hand', (r, ts) => { busy = false; hands.ms += (r.ms - hands.ms) * 0.2; hands.lat += (performance.now() - ts - hands.lat) * 0.2; /* picture → result delay */ if (hands.state === 'ready') onResult({ ts, hands: r.hands }); });
 // drop hands that have not been seen for a while (also when the camera stopped sending pictures)
 export function pruneHands(now) {
   for (let i = hands.tracks.length - 1; i >= 0; i--) if (now - hands.tracks[i].seen > 500) { const [tr] = hands.tracks.splice(i, 1); bus.emit('hand:lost', tr); }

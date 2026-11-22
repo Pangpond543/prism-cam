@@ -7,7 +7,7 @@ import { needAi, dropAi, aiOptions, aiInfo, onAi } from './ai.js';
 import { hands } from './hands.js';
 
 const log = (m) => { try { if (native) api.invoke('app:log', m); } catch { /* */ } };
-export const FACE_DEF = { faces: 1, smooth: 50, predict: 60, sens: 50, gpu: true, mesh: false };
+export const FACE_DEF = { faces: 1, smooth: 50, predict: 60, sens: 50, gpu: true, mesh: false, off: false }; // off = face tracking switched off by the user (saves CPU / GPU)
 const cfg = { ...FACE_DEF };
 // per person / PC (not per project, like the hand profiles): swapped eyes, and the calibrated "resting face"
 // calib = { bs: { blendshape -> resting score }, yaw, pitch (raw picture radians), at }

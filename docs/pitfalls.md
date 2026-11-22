@@ -72,3 +72,9 @@ The panels' number boxes are `type=text`. After a click they keep focus and Ctrl
 - New hooks: `camlost`, `devchange`, `camlog`, `camcycle:<n>`.
 
 - **Changed icon not in the exe** (2026-11-21): tauri-build does not rerun when `icons/icon.ico` changes → `touch app/src-tauri/build.rs` before building. Icons come from `../tools/brand` (see `../docs/brand.md`).
+
+## Hand tracking jerky in 1.1.0 (2026-11-22)
+- **Never make the hand model wait for another model.** 1.1.0 put hand + face in one worker and one job per picture → the hand result came only after the face model ran, and `laneGap` stretched the hand lane again. Hands now have their own worker + lane (`ai.js`). Keep the hand lane gated only by one-picture-in-flight + `handGap`.
+- **Measuring hand speed on this PC is noisy**: the hand model's own time swung 23 ↔ 65 ms between identical runs while Prism Rec (ffmpeg ddagrab) and Discord used the GPU. Compare A/B back to back, several runs each, and check `Get-Process ffmpeg, prism-rec, Discord` first. Hook: `trklog:<s>` (+ `handon` / `handoff`, `handgpu:true|false`).
+- Test windows from `run.ps1` appear on the real desktop — if Prism Rec is recording, they end up in the user's recording.
+- **Classic look (light) shows white-on-white boxes** → old light styles paint wells with translucent white over glass; on a solid white panel they vanish → add the class to the `html[data-look=classic]:not([data-theme=dark])` list at the end of this app's CSS (`var(--c-fill)` / `var(--c-hover)`). Test hooks must press `#theme-pop [data-look=…]`, never `[data-look=…]` (`<html>` carries the same attribute).

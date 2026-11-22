@@ -95,8 +95,11 @@ export function startBackground(canvas) {
   init();
   tx = mx = canvas.width / 2; ty = my = canvas.height / 2;
   const t0 = performance.now(); let tNow = 0;
+  // classic look: the canvas is hidden and the loop stops completely (no GPU work); it restarts when glass comes back
+  let raf = 0;
   const frame = (now) => {
-    requestAnimationFrame(frame);
+    if (document.documentElement.dataset.look === 'classic') { raf = 0; return; }
+    raf = requestAnimationFrame(frame);
     if (dead || document.hidden || !gl || gl.isContextLost() || now - last < 42) return;
     // light mode: the background STOPS — no animation, no pointer light, no GPU work at all. It draws again only for the
     // frame that freezes it, after a resize, and while the colours cross-fade when the theme changes.
@@ -115,5 +118,10 @@ export function startBackground(canvas) {
     gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
     window.__bgDraws = (window.__bgDraws || 0) + 1;
   };
-  requestAnimationFrame(frame);
+  raf = requestAnimationFrame(frame);
+  new MutationObserver(() => {
+    if (raf || document.documentElement.dataset.look === 'classic') return;
+    dark = document.documentElement.dataset.theme === 'dark' ? 1 : 0; last = 0; needDraw = true; // no fade from a stale theme
+    raf = requestAnimationFrame(frame);
+  }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-look'] });
 }

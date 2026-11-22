@@ -464,9 +464,15 @@ html[data-theme=dark] .multi-note { background: rgba(124, 140, 255, .22); }
 .prism-logo i:nth-child(2) { background: linear-gradient(135deg, rgba(134, 232, 214, 0.78), rgba(31, 181, 166, 0.6)); }
 .prism-logo i:nth-child(3) { background: linear-gradient(135deg, rgba(108, 199, 255, 0.8), rgba(255, 255, 255, .75)); }
 .prism-logo.big i { box-shadow: 0 18px 44px rgba(31, 181, 166, 0.4); }
-.prism-logo b.lg { position: absolute; inset: 21%; z-index: 1; display: block; filter: drop-shadow(0 1px 1.4px rgba(11, 111, 115, 0.85)); pointer-events: none; }
+.prism-logo b.lg { position: absolute; inset: 1%; z-index: 1; display: block; filter: drop-shadow(0 1px 1.4px rgba(11, 111, 115, 0.85)); pointer-events: none; }
 .prism-logo b.lg svg { display: block; width: 100%; height: 100%; overflow: visible; }
-.prism-logo.big b.lg { inset: 24%; filter: drop-shadow(0 2px 4px rgba(11, 111, 115, 0.7)); }
+.prism-logo.big b.lg { inset: 1%; filter: drop-shadow(0 2px 4px rgba(11, 111, 115, 0.7)); }
+
+/* big title-bar mark: no tile, 44 px; all three squares swing (round corners keep the outer one inside the bar), glyph smaller (2026-11-23) */
+.brand .prism-logo { width: 44px; height: 44px; flex-shrink: 0; margin-left: -6px; }
+.brand .prism-logo i { border-radius: 15px; border-width: 1.8px; }
+.brand .prism-logo b.lg { inset: 17%; }
+.brand { flex-shrink: 0; } .brand-name { white-space: nowrap; }
 
 /* "by 543" — the author's mark, faint next to the name */
 .brand-sig { font: 600 10.5px/1 var(--font-head); letter-spacing: .08em; color: var(--ink-3); opacity: .55; margin-left: -5px; transform: translateY(3px); white-space: nowrap; transition: opacity .3s var(--ease); }
@@ -497,3 +503,57 @@ html[data-theme=dark] .upd-chip { background: rgba(30, 34, 62, .86); box-shadow:
 html[data-theme=dark] .upd-chip::before { box-shadow: -1px -1px 0 rgba(255, 255, 255, .1); }
 @media (prefers-reduced-motion: reduce) { #btn-info.has-update::before { animation: none; opacity: 0; } .upd-chip { transition: opacity .2s; transform: none; } }
 /* <<< prism-brand */
+
+/* ─────────────────────────── appearance menu (under the moon / sun) ─────────────────────────── */
+.theme-pop { min-width: 252px; padding: 8px; transform-origin: top right; }
+.theme-pop .ctx-head { padding: 6px 8px 5px; }
+.seg { display: flex; gap: 3px; padding: 3px; margin-bottom: 4px; border-radius: 14px; background: rgba(255, 255, 255, .42); box-shadow: inset 0 1px 3px rgba(120, 135, 190, .28), inset 0 0 0 1px rgba(255, 255, 255, .7); }
+.seg button { flex: 1; height: 34px; display: flex; align-items: center; justify-content: center; gap: 7px; border-radius: 11px; font-weight: 600; font-size: 12.5px; color: var(--ink-2); transition: background .2s, color .2s; }
+.seg button svg { width: 16px; height: 16px; }
+.seg button:hover { background: rgba(255, 255, 255, .75); color: var(--ink); }
+.seg button.on { color: #fff; background: var(--grad); box-shadow: inset 0 1px 0 rgba(255, 255, 255, .7), 0 6px 14px -6px rgba(140, 120, 255, .9); }
+.theme-note { padding: 6px 8px 2px; font-size: 11.5px; line-height: 1.45; color: var(--ink-3); max-width: 236px; }
+#btn-theme.open { background: rgba(255, 255, 255, .85); color: var(--ink); }
+html[data-theme=dark] .seg { background: rgba(255, 255, 255, .08); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .1); }
+html[data-theme=dark] .seg button:hover:not(.on), html[data-theme=dark] #btn-theme.open { background: rgba(255, 255, 255, .13); }
+
+/* ─────────────────────────── classic look ───────────────────────────
+   Flat and still: no moving background, no refraction / frosted blur, no glints, no bounce.
+   Colours and layout stay the same so the app is still recognisably Prism. */
+html[data-look=classic] {
+  --spring: var(--ease);
+  --glass: #ffffff; --glass-strong: #ffffff;
+  --shadow: 0 1px 2px rgba(20, 24, 40, .06), 0 6px 16px -8px rgba(20, 24, 40, .16);
+  --c-line: rgba(20, 24, 40, .09); --c-fill: #eef0f4; --c-hover: rgba(20, 24, 40, .06);
+}
+html[data-look=classic][data-theme=dark] {
+  --glass: #2b2d31; --glass-strong: #313338;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .3), 0 8px 20px -10px rgba(0, 0, 0, .55);
+  --c-line: rgba(255, 255, 255, .07); --c-fill: #1e1f22; --c-hover: rgba(255, 255, 255, .07);
+}
+html[data-look=classic] body { background: #f2f3f5; }
+html[data-look=classic][data-theme=dark] body { background: #1e1f22; }
+html[data-look=classic] #bg { display: none; }
+/* panels: solid surface + hairline instead of frosted glass */
+html[data-look=classic] :is(.glass, .glass.refract) { -webkit-backdrop-filter: none; backdrop-filter: none; box-shadow: var(--shadow), inset 0 0 0 1px var(--c-line); }
+html[data-look=classic] .glass::before, html[data-look=classic] .glass::after { display: none; }
+html[data-look=classic] :is(.dock-btn em, #scanning, #modal, .upd-chip) { -webkit-backdrop-filter: none; backdrop-filter: none; }
+html[data-look=classic] .dock-btn em { background: var(--glass-strong); box-shadow: var(--shadow), inset 0 0 0 1px var(--c-line); }
+html[data-look=classic] #modal { background: rgba(20, 24, 40, .32); }
+html[data-look=classic][data-theme=dark] #modal { background: rgba(0, 0, 0, .55); }
+html[data-look=classic] #scanning { background: rgba(242, 243, 245, .94); }
+html[data-look=classic][data-theme=dark] #scanning { background: rgba(30, 31, 34, .94); }
+/* wells and hovers that were white-on-glass need a visible tone on a solid surface */
+html[data-look=classic] :is(.field, .tabs, .lang-switch, .seg, .insp-path, .insp-preview, .meter-track, .group, .av-log, .target-box, .app-size-bar, .progress, .about .kv) { background: var(--c-fill); box-shadow: inset 0 0 0 1px var(--c-line); }
+html[data-look=classic] :is(.crumb:hover, .win-btns button:hover, .icon-btn:hover, .dock-btn:hover, .row:hover, .ctx-item:hover, .chip:hover, .seg button:hover:not(.on), #btn-theme.open) { background: var(--c-hover); }
+html[data-look=classic] .win-btns button.danger:hover { background: var(--danger); }
+html[data-look=classic] .crumb.last { background: var(--c-hover); }
+html[data-look=classic] .pill-btn:not(.primary):not(.warn) { background: var(--glass); box-shadow: inset 0 0 0 1px rgba(20, 24, 40, .14); }
+html[data-look=classic][data-theme=dark] .pill-btn:not(.primary):not(.warn) { background: rgba(255, 255, 255, .06); box-shadow: inset 0 0 0 1px rgba(255, 255, 255, .1); }
+/* motion: nothing loops for decoration, nothing lifts or bounces, entrances are a quick fade */
+html[data-look=classic] :is(.prism-logo i, .pill-btn.primary, .dock-btn.active, .lang-switch i, .chip.on, .empty .big-ico, .scan-orb b, .progress:not(.indet) i) { animation: none; }
+html[data-look=classic] :is(.icon-btn, .dock-btn, .pill-btn, .win-btns button, .crumb, .ctx-item, .drive-card, .quick-card, .saved-card, .row, .chip, .tab):is(:hover, :active) { transform: none; }
+html[data-look=classic] :is(.appear, .hero, .scan-card, .ctx, .modal-card, .toast) { animation-duration: .14s; animation-delay: 0s; }
+html[data-look=classic] :is(.row .bar, .age-bar) { animation: none; }
+html[data-look=classic] .view { transform: none; transition: opacity .15s; }
+html[data-look=classic] #inspector { transition-duration: .18s; }

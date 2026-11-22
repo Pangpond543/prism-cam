@@ -7,7 +7,7 @@ import { hands, handsReady, poseHands, stopHands, pruneHands, setHandOptions, BO
 import { customList, modelReady } from './handml.js';
 import { drawHandFx, dropHandFx, clearHandDrawing, FX_DEFAULT } from './handfx.js';
 import { feedAi, pruneAi } from './ai.js';
-import { face, facesReady, placeFaces, sceneFaces, faceAnchor, faceExprSince, setFaceOptions, FACE_DEF, ZONE_RING } from './face.js';
+import { face, facesReady, stopFaces, placeFaces, sceneFaces, faceAnchor, faceExprSince, setFaceOptions, FACE_DEF, ZONE_RING } from './face.js';
 import { FACE_PTS, faceFit, faceExprList, isFaceDrive, faceExprName, zoneOfPt, faceZoneName } from './facedefs.js';
 import { drawFacePaint, paintSource, PAINTS, faceTemplate, paintThumb, FACE_LINES } from './facepaint.js';
 import { drawAvatar, AVATARS, AV_SLOTS, AV_DEF } from './avatar.js';
@@ -737,7 +737,11 @@ async function addHandSticker() {
   if (await addSticker({ hand: { ...HAND_DEF, on: true, pt: 'palm', scale: true, rot: true } })) { project.hand.on = true; bus.emit('hand:cfg'); }
 }
 /* ------------------------------------------------------------ face things */
-const faceHint = () => { if (!handSource()) toast(T`เพิ่มกล้องก่อน แล้วจะเริ่มจับใบหน้าทันที`); };
+const faceHint = () => {
+  // face tracking switched off in the Tracking tab: say so, with a one-click way back on
+  if (project.face.off) { toast(T`การจับใบหน้าปิดอยู่ — ของติดหน้าจะยังไม่ขยับตามหน้า`, { label: T`เปิดการจับใบหน้า`, action: () => { project.face.off = false; applyFaceCfg(); touch(); bus.emit('hand:cfg'); } }); return; }
+  if (!handSource()) toast(T`เพิ่มกล้องก่อน แล้วจะเริ่มจับใบหน้าทันที`);
+};
 // a picture file → stored once (library), returns its asset id
 async function pickAsset() {
   const [f] = await pickFile($('file-image')); if (!f || !f.type.startsWith('image/')) return null;
@@ -775,7 +779,7 @@ function addAvatar(kind) {
   addLayer(newLayer('avatar', { name: a[1], x: o.w / 2, y: o.h - sz / 2, w: sz, h: sz, fresh: false, av: { ...AV_DEF, kind: a[0], color: a[2], color2: a[3], parts: {} } }));
   faceNow();
   const S = handSource();
-  if (!S) faceHint();
+  if (!S || project.face.off) faceHint();
   else if (a[0] === 'png') toast(T`ใส่รูปส่วนต่าง ๆ ของตัวละครในแผงด้านขวา`);
   else if (S.vis && S.type === 'camera') toast(T`ซ่อนภาพกล้องจริงไหม? (ยังจับหน้าต่อได้)`, { label: T`ซ่อนกล้อง`, action: () => setVis([S], false) });
 }
@@ -787,11 +791,12 @@ function faceStatusText() {
   return sceneFaces.length ? T`เห็น ${sceneFaces.length} หน้า · ${face.fps} ครั้ง/วินาที` : T`ยังไม่เห็นหน้า — มองเข้ากล้องตรง ๆ`;
 }
 function faceStatusLong() {
+  if (project.face.off) return T`ปิดอยู่ — ไม่ใช้เครื่องคำนวณ (ของติดหน้า ลายบนหน้า ตัวละคร VTuber และคำสั่งสีหน้าจะหยุดทำงาน)`;
   if (!faceUse) return T`ยังไม่ได้ใช้ — เปิดเองเมื่อในซีนมีของติดหน้า ลายบนหน้า ตัวละคร VTuber หรือคำสั่งที่ใช้สีหน้า`;
   if (face.state !== 'ready' || !handSource()) return faceStatusText();
   return `${face.delegate} · ${face.fps} ${T`ครั้ง/วินาที`} · ${Math.round(face.ms)} ms · ` + (sceneFaces.length ? T`เห็น ${sceneFaces.length} หน้า` : T`ยังไม่เห็นหน้า`);
 }
-const applyFaceCfg = () => { setFaceOptions(project.face); faceNow(); };
+const applyFaceCfg = () => { setFaceOptions(project.face); faceNow(); if (project.face.off) { stopFaces(); sceneFaces.length = 0; } };
 const setFacePreview = (on) => { facePreview = !!on; faceNow(); };
 setInterval(() => { for (const e of document.querySelectorAll('[data-facest]')) e.textContent = faceStatusText(); }, 500);
 function cycleFace(dir) {
@@ -848,9 +853,9 @@ function faceUsed() {
   if (frameNo - faceUseN < 20) return faceUse;
   faceUseN = frameNo; setFaceOptions(project.face);
   const ls = allLayers(), fg = (g) => String(g || '').startsWith('f:');
-  faceUse = facePreview || ls.some((l) => (l.face && l.face.on) || l.type === 'facepaint' || l.type === 'avatar' || (l.hand && l.hand.on && fg(l.hand.gest)))
+  faceUse = !project.face.off && (facePreview || ls.some((l) => (l.face && l.face.on) || l.type === 'facepaint' || l.type === 'avatar' || (l.hand && l.hand.on && fg(l.hand.gest)))
     || (scene().clips || []).some((c) => c.drive && (isFaceDrive(c.drive.src) || fg(c.drive.gest)))
-    || project.hand.binds.some((b) => b.on && (fg(b.gesture) || (b.near && project.hand.on)));
+    || project.hand.binds.some((b) => b.on && (fg(b.gesture) || (b.near && project.hand.on))));
   return faceUse;
 }
 const faceNow = () => { faceUseN = -99; };
@@ -868,7 +873,9 @@ function trackAi(now) {
   const hOk = wantH && handsReady(), fOk = wantF && facesReady();
   const vw = r.el.videoWidth || r.el.naturalWidth || 0, vh = r.el.videoHeight || r.el.naturalHeight || 0;
   if (vw && vh) hands.ar = face.ar = vw / vh;
-  if (hOk || fOk) feedAi('track', r.el, now, { hand: hOk, face: fOk }, { maxW: 640, gap: handGap() });
+  // hands and face each get their own picture and worker (ai.js): the hands never wait for the face model
+  if (hOk) feedAi('hand', r.el, now, { hand: true }, { maxW: 640, gap: handGap() });
+  if (fOk) feedAi('face', r.el, now, { face: true }, { maxW: 640, gap: handGap() });
   const c = S.crop, cw = 1 - c.l - c.r, ch = 1 - c.t - c.b, a = S.rot * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a), fh = S.flipH ? -1 : 1, fv = S.flipV ? -1 : 1;
   const map = (x, y) => { const u = ((x - c.l) / cw - 0.5) * S.w * fh, v = ((y - c.t) / ch - 0.5) * S.h * fv; return [S.x + u * ca - v * sa, S.y + u * sa + v * ca]; };
   if (wantF) {

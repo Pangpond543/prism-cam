@@ -408,3 +408,11 @@ html[data-theme=dark] .gs-opt.on { background: linear-gradient(90deg, rgba(124, 
 /* status bar captions: which fps is which */
 .st-cap { font-size: 11.5px; font-weight: 600; color: var(--ink-3); white-space: nowrap; margin-right: -2px; }
 #st-text { min-width: 0; }
+
+/* classic look (base rules in style.css) — Prism Cam extras */
+html[data-look=classic] #layer-peek { -webkit-backdrop-filter: none; backdrop-filter: none; background: var(--glass-strong); box-shadow: var(--shadow), inset 0 0 0 1px var(--c-line); }
+html[data-look=classic] .at-play.on { animation: none; }
+html.lite[data-look=classic] .glass, html.lite[data-look=classic][data-theme=dark] .glass { background: var(--glass); }
+/* light classic: wells that were white-on-glass get a visible grey on the solid white panels */
+html[data-look=classic]:not([data-theme=dark]) :is(.sec, .chips .chip:not(.on), .grid4 .chip:not(.on), .scenes .chip:not(.on), .pick, .setup-steps, .hand-status, .b-emo, .lib-t, .pf-rows, .panel-note kbd) { background: var(--c-fill); box-shadow: inset 0 0 0 1px var(--c-line); }
+html[data-look=classic]:not([data-theme=dark]) :is(.layer:hover, .pick:hover, .fp-item:hover, .emoji-grid button:hover, .bind:hover, .lib-t:hover, #st-text.clickable:hover) { background: var(--c-hover); }

@@ -292,8 +292,10 @@ function doImport() {
 function renderFace(root) {
   const c = studio.faceCfg(), used = studio.faceInUse(), set = (patch) => { Object.assign(c, patch); studio.applyFaceCfg(); studio.touch(); renderHand(); };
   faceUseShown = used;
-  const fk = sec(root, 'face', T`การจับใบหน้า`, null, 'face');
+  // on / off like the hand section: off = the face model is closed and never runs (saves CPU / GPU on weak PCs)
+  const fk = sec(root, 'face', T`การจับใบหน้า`, { get: () => !c.off, set: (v) => { set({ off: !v }); toast(v ? T`เปิดการจับใบหน้าแล้ว` : T`ปิดการจับใบหน้าแล้ว — เครื่องไม่ต้องคำนวณหน้าอีก`); } }, 'face');
   faceStEl = el('div', 'hand-status', esc(studio.faceStatusLong())); fk.appendChild(faceStEl);
+  if (c.off) return;
   if (!used) {
     chips(fk, [[T`เลือกของติดหน้า / ลาย / VTuber…`, () => studio.openFacePicker(), false, 'face']]).style.marginTop = '6px';
     return;

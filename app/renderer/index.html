@@ -34,7 +34,7 @@
     <div class="tb-actions">
       <button class="pill-btn" id="btn-vcam" title="ส่งภาพออกเป็นกล้องให้ Discord และโปรแกรมอื่น"><span data-icon="broadcast"></span><span id="vcam-label">เริ่มกล้องเสมือน</span></button>
       <div class="lang-switch" id="lang-switch" title="ภาษา / Language"><i></i><button data-lang="th">TH</button><button data-lang="en">EN</button></div>
-      <button class="icon-btn" id="btn-theme" title="โหมดมืด / สว่าง"><span data-icon="moon"></span></button>
+      <button class="icon-btn" id="btn-theme" title="หน้าตาโปรแกรม: สว่าง / มืด · แก้ว / คลาสสิก"><span data-icon="moon"></span></button>
       <button class="icon-btn" id="btn-info" title="เกี่ยวกับ Prism Cam"><span data-icon="info"></span></button>
       <div class="win-btns">
         <button id="win-min" title="ย่อ"><span data-icon="min"></span></button>
@@ -138,6 +138,13 @@
 
 <div id="tooltip" class="glass tip hidden"></div>
 <div id="ctx" class="glass ctx hidden"></div>
+<div id="theme-pop" class="glass ctx theme-pop hidden">
+  <div class="ctx-head">ธีม</div>
+  <div class="seg"><button data-mode="light"><span data-icon="day"></span><span>สว่าง</span></button><button data-mode="dark"><span data-icon="moon"></span><span>มืด</span></button></div>
+  <div class="ctx-head">สไตล์</div>
+  <div class="seg"><button data-look="glass"><span data-icon="sparkle"></span><span>แก้ว</span></button><button data-look="classic"><span data-icon="plain"></span><span>คลาสสิก</span></button></div>
+  <p class="theme-note">คลาสสิก: พื้นเรียบ ไม่มีแสงหักเหหรือแอนิเมชัน ใช้เครื่องน้อยกว่า</p>
+</div>
 <div id="toasts"></div>
 <div id="modal" class="overlay hidden"></div>
 <input type="file" id="file-image" accept="image/*" multiple hidden>

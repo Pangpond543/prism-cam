@@ -36,8 +36,9 @@ Webcams (USB auto-picked by test hook), screen / window capture, images (file, d
 - Commands `face-next` / `face-prev` cycle visible face layers with `cycle: true`.
 - Animation drives `fyaw fpitch froll fmouth fsmile fblink fbrow fx fy fsize` (anim-core `driveRaw` → `faceDrive`).
 
-## AI worker (`ai-worker.js`, `ai.js`)
-One classic worker holds hand / face / segmentation models (lazy, GPU → CPU fallback, closed when unused). Lanes: `track` (hand + face from one picture, ≤ 640 px) and `seg:<layer>` (256 px). One picture in flight per lane; gap = max(wanted, 1.3 × worker time) × 1.3 when auto quality stepped down. Background masks arrive asynchronously (`segFeed` / `segTake`), the newest one is used.
+## AI workers (`ai-worker.js`, `ai.js`)
+Two workers run `ai-worker.js` (classic): `hand` = the hand model alone; `main` = face + segmentation models (lazy, GPU → CPU fallback, closed when unused). Lanes: `hand` and `face` (each its own picture, ≤ 640 px) and `seg:<layer>` (256 px). One picture in flight per lane; the hand lane waits only `handGap` (32 ms, 66 in light mode / level ≥ 2); other lanes wait max(wanted × 1.3 when behind, 1.3 × worker time). Background masks arrive asynchronously (`segFeed` / `segTake`), the newest one is used.
+- Face tracking on / off: Tracking tab tick (`project.face.off`); off = `faceUsed()` false, model closed, face layers pause.
 
 ## Effects (`fx.js`)
 Chroma key (green screen); AI background removal / blur (MediaPipe selfie segmenter, bundled, offline).
@@ -67,7 +68,7 @@ Every `<select>` gets a glass button + list; the hidden native select keeps the 
 Windows 11 `MFCreateVirtualCamera`, no kernel driver. App writes NV12 frames to the memory-mapped file `%ProgramData%\PrismCam\frame.bin`; the DLL inside the Windows camera service reads it (1280×720 / 1920×1080 / 640×360 @ 30 fps). Idle frame when the app isn't sending. `tick.js` keeps frames flowing while minimised.
 
 ## Shell
-Same as Prism Size: frameless glass window, TH/EN, dark mode, ⓘ About + GitHub updater (repo `Pangpond543/prism-cam`; packaged copies update from the release Setup.exe / Portable.zip, source checkouts rebuild with cargo). The app grants its own page camera/mic permission (no WebView2 prompt).
+Same as Prism Size: frameless glass window, TH/EN, appearance menu on the moon/sun button (Light/Dark + Glass/Classic; Classic = flat, still, no refraction), ⓘ About + GitHub updater (repo `Pangpond543/prism-cam`; packaged copies update from the release Setup.exe / Portable.zip, source checkouts rebuild with cargo). The app grants its own page camera/mic permission (no WebView2 prompt).
 
 ## Safety nets (2026-11-20)
 - Saved files (`project.json`, `hands.json`): a file that can't be parsed is moved to `<name>.broken-<time>.json` (never deleted); the previous save `<name>.bak` is loaded and a toast says so. Every save keeps the previous one as `.bak` (`json_load` / `json_save`, main.rs).

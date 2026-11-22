@@ -1,5 +1,5 @@
-// One worker for every AI model (hand landmarks, face landmarks, person segmentation), off the main thread so the
-// studio never stutters. One camera picture is sent once and every model that needs it reads the same bitmap.
+// AI worker (hand landmarks, face landmarks, person segmentation), off the main thread so the studio never stutters.
+// ai.js runs two of these: one for the hand model alone, one for face + background removal (see ai.js why).
 // This is a CLASSIC worker on purpose — MediaPipe loads its wasm glue with importScripts(), which module workers lack.
 const base = new URL('../vendor/mediapipe/', self.location.href).href;
 let vision = null, files = null;

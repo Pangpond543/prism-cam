@@ -1,5 +1,5 @@
 // Prism Cam — boot, Prism suite shell (title bar, language, theme, Info / update) and virtual camera control.
-import { api, native, bus, T, lang, theme, setTheme, savedTheme, remember, toast, htmlBox, hideCtx, esc, floaty, $ } from './core.js';
+import { api, native, bus, T, lang, theme, setTheme, savedTheme, setLook, savedLook, remember, toast, htmlBox, hideCtx, esc, floaty, $ } from './core.js';
 import { icon, hydrateIcons } from './icons.js';
 import { translateDom } from './i18n.js';
 import { startBackground } from './bg.js';
@@ -8,6 +8,8 @@ import { startHandUi, calibrate as calibrateFaceUi, renderHand } from './handui.
 import { facePerson, saveFacePerson, clearFaceCalib, handsNearFace, face as faceSt } from './face.js';
 import { setArmed } from './handctl.js';
 import { startAnim } from './anim.js';
+import { hands as handSt } from './hands.js';
+import { laneMs } from './ai.js';
 import { perf, nv12, ema, countSent, countBusy, setLite, setGpu, detectIgpu, calm } from './perf.js';
 import { startPerfUi, perfReport } from './perfui.js';
 import { startSelects } from './select.js';
@@ -149,6 +151,7 @@ async function boot() {
   translateDom(document.body);
   startSelects();
   hydrateIcons();
+  setLook(savedLook());
   setTheme(savedTheme());
   startBackground($('bg'));
   $('win-min').onclick = () => api.invoke('win:min');
@@ -165,7 +168,22 @@ async function boot() {
   $('btn-info').onclick = showInfo;
   $('btn-vcam').onclick = toggleVcam;
   const themeIcon = () => { $('btn-theme').firstElementChild.innerHTML = icon(theme.dark ? 'day' : 'moon'); };
-  $('btn-theme').onclick = () => { setTheme(!theme.dark); themeIcon(); };
+  // appearance menu under the moon/sun: theme (light / dark) + style (glass / classic) — suite shell, same as Prism Size
+  {
+    const pop = $('theme-pop'), tbtn = $('btn-theme'), isOpen = () => !pop.classList.contains('hidden');
+    const sync = () => {
+      pop.querySelectorAll('[data-mode]').forEach((b) => b.classList.toggle('on', (b.dataset.mode === 'dark') === theme.dark));
+      pop.querySelectorAll('[data-look]').forEach((b) => b.classList.toggle('on', (b.dataset.look === 'classic') === theme.classic));
+    };
+    const place = () => { const r = tbtn.getBoundingClientRect(), w = pop.offsetWidth; pop.style.left = Math.max(8, Math.min(r.right - w + 8, innerWidth - w - 8)) + 'px'; pop.style.top = r.bottom + 12 + 'px'; };
+    const close = () => { pop.classList.add('hidden'); tbtn.classList.remove('open'); };
+    tbtn.onclick = () => { if (isOpen()) { close(); return; } hideCtx(); sync(); pop.classList.remove('hidden'); tbtn.classList.add('open'); place(); };
+    pop.querySelectorAll('[data-mode]').forEach((b) => { b.onclick = () => { const d = b.dataset.mode === 'dark'; setTheme(d); themeIcon(); sync(); }; });
+    pop.querySelectorAll('[data-look]').forEach((b) => { b.onclick = () => { setLook(b.dataset.look === 'classic'); sync(); }; });
+    addEventListener('pointerdown', (e) => { if (isOpen() && !pop.contains(e.target) && !tbtn.contains(e.target)) close(); }, true);
+    addEventListener('keydown', (e) => { if (e.key === 'Escape' && isOpen()) { e.stopPropagation(); close(); } }, true);
+    addEventListener('resize', () => { if (isOpen()) place(); }); // snap / maximise: follow the button
+  }
   themeIcon();
   // language tube: switching reloads the window; the saved project brings everything straight back
   const ls = $('lang-switch');
@@ -208,6 +226,12 @@ async function boot() {
   for (const act of acts) {
     if (act === 'en' || act === 'th') { if (lang !== act) { remember('prism.lang', act); location.reload(); return; } }
     else if (act === 'dark' || act === 'light') { setTheme(act === 'dark'); themeIcon(); }
+    else if (act === 'themepop' || act === 'classic' || act === 'glass') { // full press sequence, so the close-on-outside-press listener runs too
+      const press = (el) => { el.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true })); el.dispatchEvent(new PointerEvent('pointerup', { bubbles: true })); el.click(); };
+      if (act === 'themepop') press($('btn-theme'));
+      else if (!$('theme-pop').classList.contains('hidden')) press(document.querySelector(`#theme-pop [data-look=${act}]`));
+      else setLook(act === 'classic');
+    }
     else if (act === 'info') showInfo();
     else if (act === 'updfake') window.__prismUpdFake = true;
     else if (act === 'vcam') await toggleVcam();
@@ -288,6 +312,11 @@ async function boot() {
     else if (act.startsWith('tab:')) studio.showTab(act.slice(4));
     else if (act === 'unguard') { try { localStorage.removeItem('prismCamOpening'); } catch { /* */ } api.invoke('app:log', 'unguard: camera guard cleared'); }
     else if (act === 'clear') { studio.reset(); }
+    else if (act.startsWith('handgpu:')) { studio.hand().gpu = act.endsWith('true'); studio.applyHandCfg(); studio.touch(); await wait(3000); }
+    else if (act === 'handon' || act === 'handoff') { studio.hand().on = act === 'handon'; studio.applyHandCfg(); studio.touch(); renderHand(); await wait(300); }
+    else if (act.startsWith('trklog:')) { // hand / face tracking speed, once a second: results/s, model ms, picture → result delay
+      for (let i = 0; i < +act.slice(7); i++) { await wait(1000); api.invoke('app:log', `trklog: hand ${handSt.state} ${handSt.fps}/s ${handSt.ms.toFixed(1)}ms lat=${handSt.lat.toFixed(0)}ms · face ${faceSt.state} ${faceSt.fps}/s ${faceSt.ms.toFixed(1)}ms · lanes hand ${laneMs('hand').toFixed(1)} face ${laneMs('face').toFixed(1)}ms · src=${(studio.handSource() || {}).name} ${(studio.handSource() || {}).type} · fps=${perf.fps} draw=${perf.ms.draw.toFixed(1)}ms lvl=${perf.level} cpu=${perf.cpu}`); }
+    }
     // camera unplug self-test: camlost = the open cameras report "ended" (as when the USB cable is pulled), devchange = Windows re-lists devices
     else if (act === 'camlost') { for (const c of studio.camStates()) if (c.stream) c.stream.getVideoTracks().forEach((t) => t.dispatchEvent(new Event('ended'))); await wait(500); api.invoke('app:log', 'camlost: ' + studio.camStates().map((c) => `failed=${c.failed} lost=${!!c.lost} stream=${!!c.stream}`).join(' | ')); }
     else if (act === 'devchange') { navigator.mediaDevices.dispatchEvent(new Event('devicechange')); await wait(1700); }
@@ -373,3 +402,4 @@ boot();
   });
 }
 /* <<< prism-update-nudge */
+
