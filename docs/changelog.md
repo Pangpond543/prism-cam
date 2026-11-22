@@ -2,6 +2,7 @@
 
 Format: `YYYY-MM-DD — what changed — why`. Add a line after every fix/feature.
 
+- 2026-11-23 — **v1.2.0 released** — classic look, face tracking on/off, smoother hands, logo v2. Files: Setup.exe + Portable.zip on GitHub Releases; notes TH + EN in `docs/release-notes-1.2.0.md`. `tauri.conf.json` version was stale (1.0.2) — now kept equal to package.json / Cargo.toml.
 - 2026-11-23 — **Appearance menu + Classic look** (suite-wide, design approved on Prism Size). The moon/sun button opens a small menu: Theme (Light / Dark) and Style (Glass / Classic). Classic = flat solid panels on a plain background (Discord-like greys), no moving background, no refraction / blur / glints, no decorative looping animation or hover bounce; status indicators still move. Classic is independent of "Lite mode" (both can be on). — user wanted a calm, use-focused mode.
 - 2026-11-23 — Title-bar logo: outer square swings again (with the other two) and the glyph is ~25 % smaller. — user review.
 - 2026-11-22 — **Logo v2** (user review): app icon = the layered tile at every size (no plain small version) with a bigger glyph; title-bar logo = squares + glyph with no tile, 26 → 44 px, outer square still. — user wanted the big icon everywhere and a much bigger logo in the bar.

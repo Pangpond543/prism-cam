@@ -39,4 +39,4 @@ Screenshot: PowerShell `CopyFromScreen` on the process's main-window rect.
 - `PKG_NAME` in `main.rs` must equal `app/package.json` "name" (`prism-cam-studio`) or the updater refuses the update.
 
 ## Release
-GitHub: `Pangpond543/prism-cam` (public; `app/prism.config.json` → repo). New version: bump `app/package.json` + `app/src-tauri/Cargo.toml` version, run the i18n audit (see pitfalls), `bash tools/release.sh` → `%USERPROFILE%\PrismCamBuild\dist\Prism-Cam-<ver>-Setup.exe` + `-Portable.zip`, commit + push, `gh release create v<ver> <both files>`. No CI build (see pitfalls).
+GitHub: `Pangpond543/prism-cam` (public; `app/prism.config.json` → repo). New version: bump the version in `app/package.json`, `app/src-tauri/Cargo.toml` AND `app/src-tauri/tauri.conf.json`, write `docs/release-notes-<ver>.md` (TH + EN), run the i18n audit (see pitfalls), `bash tools/release.sh` → `%USERPROFILE%\PrismCamBuild\dist\Prism-Cam-<ver>-Setup.exe` + `-Portable.zip`, commit + push, `gh release create v<ver> <both files> --notes-file docs/release-notes-<ver>.md`. No CI build (see pitfalls).
