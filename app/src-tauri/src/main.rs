@@ -4,6 +4,8 @@
 #![allow(non_snake_case)]
 
 mod input;
+mod media;
+mod phone;
 mod update;
 mod vcam_host;
 
@@ -49,7 +51,7 @@ fn win_min(window: WebviewWindow) { let _ = window.minimize(); }
 #[tauri::command]
 fn win_max(window: WebviewWindow) { let _ = if window.is_maximized().unwrap_or(false) { window.unmaximize() } else { window.maximize() }; }
 #[tauri::command]
-fn win_close(app: AppHandle) { input::release_all(); vcam_host::stop(); app.exit(0); }
+fn win_close(app: AppHandle) { input::release_all(); vcam_host::stop(); phone::stop(); app.exit(0); }
 #[tauri::command]
 fn app_ready(window: WebviewWindow) { let _ = window.show(); let _ = window.set_focus(); }
 #[tauri::command]
@@ -225,6 +227,57 @@ fn serve_media(app: &AppHandle, req: &tauri::http::Request<Vec<u8>>) -> tauri::h
     if partial { b.status(StatusCode::PARTIAL_CONTENT).header("Content-Range", format!("bytes {start}-{end}/{len}")).body(buf).unwrap() } else { b.status(StatusCode::OK).body(buf).unwrap() }
 }
 
+/* ------------------------------------------------------------- phone camera */
+// see phone.rs: HTTPS page on the home network + WebRTC hand-shake relay; the studio page does the WebRTC itself
+#[tauri::command(async)]
+fn phone_start(app: AppHandle, a: Value) -> Value { let dir = data_dir(&app); phone::start(&app, dir, a["token"].as_str().unwrap_or("").to_string()) }
+#[tauri::command(async)]
+fn phone_stop() -> Value { phone::stop(); json!({ "ok": true }) }
+#[tauri::command(async)]
+fn phone_state() -> Value { phone::running() }
+#[tauri::command]
+fn phone_send(a: Value) -> Value { phone::send(a["pid"].as_str().unwrap_or(""), a["m"].clone()) }
+#[tauri::command(async)]
+fn phone_qr(a: String) -> Value { phone::qr_svg(&a) }
+#[tauri::command(async)]
+fn phone_fw() -> Value { phone::fw_status() }
+#[tauri::command(async)]
+fn phone_fwFix() -> Value { phone::fw_fix() }
+
+/* ------------------------------------------------- now playing + lyrics */
+#[tauri::command(async)]
+fn music_now(a: Value) -> Value { media::now(&a) }
+#[tauri::command(async)]
+fn music_art(a: Value) -> Value { media::art(&a) }
+#[tauri::command]
+fn music_level(a: Value) -> Value { media::level(&a) }
+#[tauri::command(async)]
+fn music_lyrics(app: AppHandle, a: Value) -> Value { media::lyrics(&data_dir(&app), &a) }
+#[tauri::command(async)]
+fn music_lyricsPut(app: AppHandle, a: Value) -> Value { media::lyrics_put(&data_dir(&app), &a) }
+// the user's own font files (lyrics / text layers), kept in <data>/fonts for every project; x-name is URI-encoded (Thai names)
+#[tauri::command(async)]
+fn font_put(app: AppHandle, request: Request<'_>) -> Value {
+    let InvokeBody::Raw(bytes) = request.body() else { return json!({ "ok": false }) };
+    media::font_put(&data_dir(&app), &urldec(header(&request, "x-name")), bytes)
+}
+fn urldec(s: &str) -> String {
+    let (b, mut o, mut i) = (s.as_bytes(), Vec::new(), 0);
+    while i < b.len() {
+        if b[i] == b'%' && i + 2 < b.len() + 1 && i + 3 <= b.len() {
+            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) { o.push(v); i += 3; continue; }
+        }
+        o.push(b[i]); i += 1;
+    }
+    String::from_utf8_lossy(&o).to_string()
+}
+#[tauri::command(async)]
+fn font_list(app: AppHandle) -> Value { media::font_list(&data_dir(&app)) }
+#[tauri::command(async)]
+fn font_get(app: AppHandle, a: String) -> tauri::ipc::Response { tauri::ipc::Response::new(media::font_get(&data_dir(&app), &a)) }
+#[tauri::command(async)]
+fn font_del(app: AppHandle, a: String) -> Value { media::font_del(&data_dir(&app), &a) }
+
 /* ----------------------------------------------------------- virtual camera */
 #[tauri::command(async)]
 fn vcam_start(_a: Value) -> Value { vcam_host::start() }
@@ -260,6 +313,7 @@ fn perf_cpu() -> i32 {
 
 fn main() {
     if std::env::args().any(|a| a == "--install-vcam") { std::process::exit(vcam_host::install_elevated()); }
+    if std::env::args().any(|a| a == "--phone-firewall") { std::process::exit(phone::fw_elevated()); }
     {
         let exe = std::env::current_exe().unwrap_or_default();
         let mt = std::fs::metadata(&exe).and_then(|m| m.modified()).ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_secs()).unwrap_or(0);
@@ -270,7 +324,9 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             win_min, win_max, app_log, win_close, app_ready, app_relaunch, about_info, about_openRepo, update_check, update_apply,
             project_load, project_save, media_save, media_reveal, media_put, media_has, media_gc, vcam_start, vcam_stop, vcam_install, vcam_frame, perf_cpu,
-            input::input_arm, input::input_pointer, input::input_run, input::input_pick, hand_load, hand_save, hand_export
+            input::input_arm, input::input_pointer, input::input_run, input::input_pick, hand_load, hand_save, hand_export,
+            phone_start, phone_stop, phone_state, phone_send, phone_qr, phone_fw, phone_fwFix,
+            music_now, music_art, music_level, music_lyrics, music_lyricsPut, font_put, font_list, font_get, font_del
         ])
         .register_asynchronous_uri_scheme_protocol("pmedia", |ctx, req, responder| {
             let app = ctx.app_handle().clone();
@@ -308,10 +364,10 @@ fn main() {
                     api.prevent_close();
                     let _ = w.emit("app:close", json!({}));
                     let app = w.app_handle().clone();
-                    std::thread::spawn(move || { std::thread::sleep(std::time::Duration::from_secs(4)); input::release_all(); vcam_host::stop(); app.exit(0); });
+                    std::thread::spawn(move || { std::thread::sleep(std::time::Duration::from_secs(4)); input::release_all(); vcam_host::stop(); phone::stop(); app.exit(0); });
                 }
             }
-            tauri::WindowEvent::Destroyed => { input::release_all(); vcam_host::stop(); }
+            tauri::WindowEvent::Destroyed => { input::release_all(); vcam_host::stop(); phone::stop(); }
             _ => {}
         })
         .run(tauri::generate_context!())

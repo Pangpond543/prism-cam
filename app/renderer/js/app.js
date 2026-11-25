@@ -13,6 +13,7 @@ import { laneMs } from './ai.js';
 import { perf, nv12, ema, countSent, countBusy, setLite, setGpu, detectIgpu, calm } from './perf.js';
 import { startPerfUi, perfReport } from './perfui.js';
 import { startSelects } from './select.js';
+import { openPhoneDialog, phones, phoneSet, phoneLink } from './phonecam.js';
 
 /* ------------------------------------------------------------ about/update */
 const AUTHOR = 'Thanakorn Damrikitjaroen', MODEL = 'Claude Fable 5.2';
@@ -233,6 +234,44 @@ async function boot() {
       else setLook(act === 'classic');
     }
     else if (act === 'info') showInfo();
+    // phone as camera: phone = open the QR dialog · phoneurl = log the phone link (for a test browser) · phonelog:<s> =
+    // log each phone's state every second · phoneset:<key>=<value> = control the first phone · phoneclean = remove phone layers
+    else if (act === 'phone') { openPhoneDialog(); await wait(1500); }
+    else if (act === 'phoneurl') { const r = await phoneLink(); api.invoke('app:log', r.ok ? `phoneurl ${r.url} ips=${JSON.stringify(r.ips)}` : `phoneurl failed ${r.reason}`); }
+    else if (act.startsWith('phonelog:')) {
+      const n = +act.slice(9) || 10;
+      (async () => { for (let i = 0; i < n; i++) { await wait(1000); for (const e of phones.values()) api.invoke('app:log', `phonelog ${e.pid} st=${e.st} away=${e.away} rx=${JSON.stringify(e.rx)} cam=${e.info ? `${e.info.w}x${e.info.h}@${e.info.fps} f=${e.info.facing} z=${e.info.set && e.info.set.zoom} paused=${e.info.paused} enc=${JSON.stringify(e.info.enc)}` : '-'} video=${e.video.videoWidth}x${e.video.videoHeight}`); } })();
+    }
+    else if (act.startsWith('phoneset:')) { const [k, v] = act.slice(9).split('='); const e = [...phones.values()][0]; if (e) phoneSet(e.pid, k, isNaN(+v) ? (v === 'true' ? true : v === 'false' ? false : v) : +v); await wait(1500); }
+    else if (act === 'phonesel') { const L = studio.allLayers().find((l) => l.phone); if (L) { studio.select(L.id); studio.showTab('props'); } await wait(400); }
+    else if (act === 'phoneclean') { for (const sc of studio.scenes()) for (const L of studio.allLayers(sc)) if (L.phone) studio.removeLayer(L.id); api.invoke('app:log', 'phoneclean done'); }
+    // lyrics layer: lyrics (add), lydemo (made-up song), lystyle:<karaoke|fade|scroll|card>, lyset:<key>=<value>, lylog:<n> (song + lyrics state each second), lyclean
+    else if (act === 'lyrics') { studio.addLyrics(); await wait(600); }
+    else if (act === 'lydemo') { studio.music.demo = true; studio.refreshProps(); }
+    else if (act.startsWith('lystyle:') || act.startsWith('lyset:')) {
+      const L = studio.allLayers().find((l) => l.type === 'lyrics');
+      if (L && act.startsWith('lystyle:')) studio.setLyStyle(L, act.slice(8));
+      else if (L) { const [k, v] = act.slice(6).split('='); (['x', 'y', 'w', 'h'].includes(k) ? L : L.ly)[k] = v === 'true' ? true : v === 'false' ? false : v !== '' && !isNaN(+v) ? +v : v; studio.commit(); studio.select(L.id); studio.refreshProps(); }
+      await wait(300);
+    }
+    else if (act.startsWith('lylog:')) { for (let i = 0; i < +act.slice(6); i++) { await wait(1000); const m = studio.music, ly = m.ly || {}; api.invoke('app:log', `lylog: ok=${m.ok} none=${m.none} ad=${m.ad} album=${m.album} demo=${m.demo} app=${m.app} "${m.title}" / "${m.artist}" playing=${m.playing} pos=${Math.round(m.playing ? m.pos + performance.now() - m.at : m.pos)} dur=${m.dur} lyrics=${ly.state} src=${ly.source || ''} lines=${(ly.lines || []).length} art=${!!m.artImg} apps=${m.apps.map((a) => a.name).join('|')} lvl=${(m.lvl || 0).toFixed(3)} beats=${m.beats} whole=${m.whole} appId=${m.appId}`); } }
+    // lyfake:<artist>|<title>|<seconds>|<start at s> — pretend that song plays (real LRCLIB lookup), logs what came back
+    else if (act.startsWith('lyfake:')) { const [ar, ti, d, from] = decodeURIComponent(act.slice(7)).split('|'); const ly = await studio.fakeSong(ar, ti, (+d || 0) * 1000, (+from || 0) * 1000); api.invoke('app:log', `lyfake: ${ly.state} src=${ly.source || ''} lines=${(ly.lines || []).length} first=${JSON.stringify((ly.lines || []).filter((l) => !l.gap).slice(0, 2).map((l) => [Math.round(l.t), l.text]))}`); }
+    // fonttest: own-font round trip (save under a Thai name → list → load → use → remove); leaves nothing behind
+    else if (act === 'fonttest') {
+      try {
+        const bytes = new Uint8Array(await (await fetch('fonts/bai-jamjuree-thai-500-normal.woff2')).arrayBuffer());
+        const put = await api.raw('font_put', bytes, { 'x-name': encodeURIComponent('ฟอนต์ทดสอบ Prism.woff2') });
+        const list = await api.invoke('font:list'); const got = await api.invoke('font:get', put.name);
+        const fam = await studio.addFontFile(put.name, null);
+        const del = await studio.removeFontFile(fam);
+        const after = await api.invoke('font:list');
+        api.invoke('app:log', `fonttest: put=${JSON.stringify(put)} list=${JSON.stringify(list.fonts)} got=${got && got.byteLength} of ${bytes.length} family=${fam} afterDel=${JSON.stringify(after.fonts)}`);
+      } catch (err) { api.invoke('app:log', 'fonttest: ' + err); }
+    }
+    // lylevel:<app> — the native loudness meter for that app (falls back to all PC sound), 8 samples
+    else if (act.startsWith('lylevel:')) { const out = []; for (let i = 0; i < 8; i++) { const r = await api.invoke('music:level', { app: act.slice(8) }); out.push(r && r.ok ? `${r.lvl.toFixed(3)}/${r.beats}${r.whole ? 'w' : ''}${r.run ? '' : '!'}${r.err ? '[' + r.err + ']' : ''}` : 'fail'); await wait(250); } api.invoke('app:log', 'lylevel: ' + out.join(' ')); }
+    else if (act === 'lyclean') { for (const sc of studio.scenes()) for (const L of studio.allLayers(sc)) if (L.type === 'lyrics') studio.removeLayer(L.id); studio.music.demo = false; api.invoke('app:log', 'lyclean done'); }
     else if (act === 'updfake') window.__prismUpdFake = true;
     else if (act === 'vcam') await toggleVcam();
     else if (act === 'vcamtest') { // open our own virtual camera and report what comes out of it
@@ -402,4 +441,5 @@ boot();
   });
 }
 /* <<< prism-update-nudge */
+
 

@@ -35,3 +35,15 @@ Format: `YYYY-MM-DD — idea — status (reason if given)`
 - 2026-11-20 — Separate "Face" tab — ไม่เอา (5 แท็บรกเกินไป รวมเป็นแท็บติดตาม)
 - 2026-11-20 — Hand position on the face for any gesture binding + both hands + one-click "put on / take off" — ทำแล้ว
 - 2026-11-20 — Glasses fly in from the hands' position (instead of sliding down) — ยังไม่ทำ (ทำแบบเลื่อนลงจากเหนือหัวแทน)
+- 2026-11-23 — Phone as a camera over Wi-Fi (web page + QR, no app) with full controls — ทำแล้ว
+- 2026-11-23 — Native phone app (Android / iPhone) for USB connection, camera running with the screen off, more lens control — ยังไม่ทำ (เว็บได้ ~85-90 %; ค่อยทำถ้ามือถือจริงได้ไม่พอ)
+- 2026-11-23 — Phone microphone as an audio source / phone as a remote (scene buttons, record) — ยังไม่ทำ
+- 2026-11-23 — Lyrics layer: now playing (Spotify / browsers) + synced lyrics (LRCLIB) in 4 styles, Prism glass, fonts — ทำแล้ว
+- 2026-11-23 — Lyrics colour taken from the album cover (changes with each song) — ยังไม่ทำ
+- 2026-11-23 — Lyrics that pulse with the beat — ยังไม่ทำ
+- 2026-11-23 — Lyrics as a speech bubble that follows the face (face tracking) — ยังไม่ทำ
+- 2026-11-24 — Lyrics: spinning record + title in every style, colour from the cover / own colours seeping in the glass with the loudness, water ripples on beats — ทำแล้ว
+- 2026-11-24 — Glow spilling outside the glass with the beat / colour spreading over the whole picture — ไม่เอา (เลือกสีในแก้วอย่างเดียว)
+- 2026-11-24 — Record reacting to the music (spins faster when loud, light running on the grooves) — ยังไม่ทำ
+- 2026-11-24 — Sung words take a light colour from the cover — ยังไม่ทำ
+- 2026-11-24 — Tonearm that lifts on pause and drops on play — ยังไม่ทำ

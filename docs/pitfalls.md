@@ -1,5 +1,18 @@
 # Prism Cam — pitfalls (symptom → cause → do this)
 
+- **Animated test page looks half-faded / frozen in the browser pane (2026-11-24)** → the Browser pane was hidden, so `requestAnimationFrame` did not run; screenshots caught single stale frames. → Judge animation in the exe (run2.ps1) or make sure the pane is shown (`tabs_context`).
+- **New Win32 / WinRT features** → add them to the `winrt` (windows 0.62) dependency, never to `windows` 0.61 (vcam DLL, see below). Core Audio (session peak meters) lives there too.
+
+- **"I don't see the update" while the log shows the new exe (2026-11-24)** → the user's Prism Cam has light mode on (`perf: … lite=true` in the REAL log), and the new lyrics glass was switched off in light mode. My test runs use a different WebView profile (MSIX sandbox) with light mode off, so I never saw it. → Read the user's real log (schtasks trick) for `lite=`; test with `PRISM_ACT=lite,…` then `nolite`. Lyrics now ignore light mode.
+- **Old Start-menu shortcut** → `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Prism Cam.lnk` pointed to `PrismCamBuild\installtest\prism-cam.exe` (an install test from 2026-11-18): opening from Start / search gave an old build. Repointed to `app\bin` on 2026-11-24 (via schtasks — my shell only sees a virtual AppData). Check both shortcuts when the user says they don't see a change.
+
+- **"The glass doesn't refract" (2026-11-24)** → a blur + tint is frosted plastic, not Prism glass. The glass needs the theme's light: refraction / dispersion at the rim, rim light, specular (`glass.js`). Judge it over a detailed picture (a photo), not over black — on black there is nothing to bend. Rainbow colours must be the theme pastels; a full-saturation hue wheel turns into an RGB "gamer" glow on dark scenes.
+- **Comparing with a chat demo** → put the canvas version over the same scene in a temporary page in `app/renderer` (served by `npm run web`) and delete it before building — anything in `app/renderer` is embedded in the exe.
+
+- **prism_vcam.dll changed although its code didn't (2026-11-23)** → the workspace builds both crates with one feature set per dependency: adding WinRT features to `windows 0.61` in the app crate rebuilt the DLL differently → `is_installed` (byte compare) would ask the user to install the virtual camera again. → New `windows` features for the app go on the separate `winrt` dependency (`windows 0.62`, Cargo.toml). After every build: `cmp app/bin/prism_vcam.dll "/c/Program Files/Prism Cam/prism_vcam.dll"`.
+- **Lyrics invisible on the stage (2026-11-23)** → canvas text measured in a layout cache but drawn without setting `ctx.font` (cached layouts skip the measure) → tiny default font. Every draw sets `ctx.font = lay.font`. Also: dark ink on "clear" glass over a dark camera = invisible → colour is automatic from the brightness behind the pane (`sense` in lyrics.js), never a fixed dark default.
+- **WinRT async in `windows 0.62`** → `.get()` is gone, use `.join()`.
+
 - **User says "still hangs / not fixed" while my build works** → the user is running a different (old) exe. 2026-11-14 I built into `%LOCALAPPDATA%\PrismCam\target`, which the MSIX Claude app redirects to a private store, so nothing reached the user for hours. → Build into `%USERPROFILE%\PrismCamBuild\target`, copy into `app\bin`, check the START log line from the user's own launch. Full story: `../../docs/LESSONS.md` #1.
 - **Camera stuck on "Opening…" + AMD driver timeout (Event 4101)** → I treated this as a GPU-driver problem and added Chromium switches (`additionalBrowserArgs` in `tauri.conf.json`: no D3D11 video capture/decoder, no accelerated MJPEG/video decode, no GPU memory buffer frames). It was never confirmed that the driver was the cause, because the user was on the old exe the whole time. → Don't build more on that theory; if camera trouble returns, first confirm the user runs the current build, then test removing switches one by one.
 - **UI change not visible to the user** → renderer is embedded in the exe → rebuild + copy to `app\bin`.
@@ -72,6 +85,15 @@ The panels' number boxes are `type=text`. After a click they keep focus and Ctrl
 - New hooks: `camlost`, `devchange`, `camlog`, `camcycle:<n>`.
 
 - **Changed icon not in the exe** (2026-11-21): tauri-build does not rerun when `icons/icon.ico` changes → `touch app/src-tauri/build.rs` before building. Icons come from `../tools/brand` (see `../docs/brand.md`).
+
+## Phone camera (2026-11-23)
+- **"Works on the PC, the real phone can't connect"** → Windows Firewall. Dismissing Windows' first question makes an inbound BLOCK rule for prism-cam.exe (seen on this PC: 2 block rules, Wi-Fi = Public profile), and block beats allow. Tests with a fake phone on the same PC never see it (traffic to your own address is not filtered). The QR dialog checks it (`phone_fw`) and offers the fix; check by hand with `Get-NetFirewallApplicationFilter -Program <exe> | Get-NetFirewallRule`.
+- **Headless Edge's fake camera dies after ~1 s** (track `ended`, device list empty) unless Edge runs with `--disable-gpu` — it is the test browser, not our code (`fakephone.mjs` passes it).
+- **The picture starts blurry and sharpens over ~20 s** → WebRTC's start bitrate (~300 kbit/s). The answer carries `x-google-start-bitrate` / `x-google-min-bitrate` (`boost` in phonecam.js). Never put `x-google-max-bitrate` there: it would cap later quality / 4K changes.
+- **After Prism Cam restarts the phone waited ~7 s** for its old connection to time out → `cfg.live` tells the phone whether the PC still has a live connection; only then it keeps it.
+- **`applyConstraints` replaces ALL constraints** — the phone always sends size / fps (`base()`) together with the fine controls, or the camera may fall back to 640×480.
+- Phones open one camera at a time: stop the old track before opening the next (switch / lens / size), then `replaceTrack` (no new hand-shake).
+- Editing files from Claude's Bash tool: inside a heredoc `\\` arrives as `\` (JS / regex / Windows paths break) and Thai text through `python - <<EOF` can arrive mangled → write patch scripts with the Write tool and run them with `PYTHONUTF8=1`. Files in this checkout are CRLF: open them in Python text mode (not `newline=''`) so replacements match.
 
 ## Hand tracking jerky in 1.1.0 (2026-11-22)
 - **Never make the hand model wait for another model.** 1.1.0 put hand + face in one worker and one job per picture → the hand result came only after the face model ran, and `laneGap` stretched the hand lane again. Hands now have their own worker + lane (`ai.js`). Keep the hand lane gated only by one-picture-in-flight + `handGap`.

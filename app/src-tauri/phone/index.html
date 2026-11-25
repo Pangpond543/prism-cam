@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="th">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<meta name="theme-color" content="#1e1f22">
+<meta name="color-scheme" content="dark">
+<meta name="referrer" content="no-referrer">
+<title>Prism Cam</title>
+<link rel="icon" href="/icon.svg">
+<link rel="apple-touch-icon" href="/icon.svg">
+<link rel="stylesheet" href="/phone.css">
+</head>
+<body>
+<div id="app">
+  <header id="top">
+    <img src="/icon.svg" alt="" class="logo">
+    <div class="ttl"><b>Prism Cam</b><small id="sub"></small></div>
+    <span id="dot" class="dot"></span>
+  </header>
+
+  <main id="view">
+    <video id="pv" playsinline muted autoplay></video>
+    <div id="ring" class="ring hidden"></div>
+    <div id="zoomtag" class="zoomtag hidden"></div>
+    <div id="msg" class="msg hidden"><p id="msg-t"></p><button id="msg-b" class="btn primary hidden"></button></div>
+  </main>
+
+  <div id="zoombar" class="zoombar hidden">
+    <button class="zq" data-z="min">0.5×</button><button class="zq" data-z="1">1×</button><button class="zq" data-z="2">2×</button>
+    <input id="zoom" type="range" min="1" max="1" step="0.01" value="1"><output id="zoom-o">1×</output>
+  </div>
+
+  <nav id="bar">
+    <button id="b-flip" class="tb" disabled><svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><path d="M9 13a3 3 0 0 1 5.2-2M15 13a3 3 0 0 1-5.2 2"/><path d="M14 9.5V11h-1.5M10 16.5V15h1.5"/></svg><span data-t="flip"></span></button>
+    <button id="b-torch" class="tb hidden"><svg viewBox="0 0 24 24"><path d="M8 3h8v4l-2 3v11h-4V10L8 7z"/><path d="M12 13v3"/></svg><span data-t="torch"></span></button>
+    <button id="b-pause" class="tb" disabled><svg viewBox="0 0 24 24"><path d="M9 6v12M15 6v12"/></svg><span data-t="pause"></span></button>
+    <button id="b-dim" class="tb" disabled><svg viewBox="0 0 24 24"><path d="M20 14.5A8 8 0 1 1 9.5 4a6.5 6.5 0 0 0 10.5 10.5z"/></svg><span data-t="dim"></span></button>
+    <button id="b-more" class="tb"><svg viewBox="0 0 24 24"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/></svg><span data-t="more"></span></button>
+  </nav>
+
+  <section id="sheet" class="sheet hidden">
+    <div class="sh-head"><b data-t="settings"></b><button id="sh-x" class="x">✕</button></div>
+    <div id="sh-body"></div>
+  </section>
+
+  <div id="dimmer" class="dimmer hidden"><p data-t="dimmed"></p></div>
+</div>
+<script src="/phone.js"></script>
+</body>
+</html>

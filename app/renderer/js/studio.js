@@ -13,6 +13,8 @@ import { drawFacePaint, paintSource, PAINTS, faceTemplate, paintThumb, FACE_LINE
 import { drawAvatar, AVATARS, AV_SLOTS, AV_DEF } from './avatar.js';
 import { FACE_PACK, packPng, packThumb } from './facepack.js';
 import { frame as animFrame, AV, kxOf, kyOf, uid as auid, PROPS as APROPS, fixClip, evalTrack } from './anim-core.js';
+import { fakeSong, drawLyrics, LY_DEF, LY_FONTS, userFonts, music, musicNeed, musicStatus, lyricsReload, lyricsOwn, looksLrc, loadUserFonts, addFontFile, removeFontFile } from './lyrics.js';
+import { initPhones, phoneVideo, phoneStatus, phoneNeed, phoneName, openPhoneDialog, phonePanel, closePhones } from './phonecam.js';
 
 // GPU canvas when the graphics chip converts the camera picture (perf.js nv12: no per-frame CPU read-back at all);
 // CPU canvas otherwise (the RGBA path reads every frame back). The old note "a GPU canvas made AMD drivers time out"
@@ -23,8 +25,8 @@ const uid = () => Math.random().toString(36).slice(2, 9);
 const MEDIA = new Set(['camera', 'screen', 'image', 'video']);
 // layers that cover the whole stage and draw from the trackers (no box, no area, no copy)
 const FULLFX = new Set(['handfx', 'facepaint']);
-const TYPE_ICON = { camera: 'camera', screen: 'screen', image: 'image', video: 'film', text: 'text', shape: 'shape', frame: 'frame', handfx: 'hand', area: 'area', facepaint: 'face', avatar: 'face' };
-const typeLabel = (t) => ({ camera: T`กล้อง`, screen: T`หน้าจอ`, image: T`รูปภาพ`, video: T`วิดีโอ`, text: T`ข้อความ`, shape: T`รูปทรง`, frame: T`กรอบ`, handfx: T`เอฟเฟกต์มือ`, area: T`พื้นที่แอนิเมชัน`, facepaint: T`ลายบนหน้า`, avatar: T`ตัวละคร VTuber` }[t] || t);
+const TYPE_ICON = { camera: 'camera', screen: 'screen', image: 'image', video: 'film', text: 'text', shape: 'shape', frame: 'frame', handfx: 'hand', area: 'area', facepaint: 'face', avatar: 'face', lyrics: 'music' };
+const typeLabel = (t) => ({ camera: T`กล้อง`, screen: T`หน้าจอ`, image: T`รูปภาพ`, video: T`วิดีโอ`, text: T`ข้อความ`, shape: T`รูปทรง`, frame: T`กรอบ`, handfx: T`เอฟเฟกต์มือ`, area: T`พื้นที่แอนิเมชัน`, facepaint: T`ลายบนหน้า`, avatar: T`ตัวละคร VTuber`, lyrics: T`เนื้อเพลง` }[t] || t);
 
 /* ------------------------------------------------------------------ project */
 // hand tracking settings live in the project (saved with it, but not part of undo)
@@ -314,6 +316,17 @@ function natural(L) {
   return w && h ? { w, h } : null;
 }
 const cropAspect = (L, n) => (n.w * (1 - L.crop.l - L.crop.r)) / (n.h * (1 - L.crop.t - L.crop.b));
+// the part of the source that is shown: the crop, then the digital zoom inside it (L.dz = { z >= 1, x / y pan -1..1,
+// in the direction it is seen on the stage }). Drawing, hand / face tracking and the mouse zone all read this.
+function effCrop(L) {
+  const c = L.crop, d = L.dz;
+  if (!d || !(d.z > 1.001)) return c;
+  const cw = 1 - c.l - c.r, ch = 1 - c.t - c.b, nw = cw / d.z, nh = ch / d.z;
+  const px = clamp((L.flipH ? -1 : 1) * (+d.x || 0), -1, 1), py = clamp((L.flipV ? -1 : 1) * (+d.y || 0), -1, 1);
+  const l = c.l + (cw - nw) * (0.5 + px / 2), t = c.t + (ch - nh) * (0.5 + py / 2);
+  return { l, t, r: 1 - l - nw, b: 1 - t - nh };
+}
+const phonesUsed = () => { const u = new Set(); for (const sc of project.scenes) for (const l of allLayers(sc)) if (l.type === 'camera' && l.phone) u.add(l.phone); return u; };
 function place(L, mode) {
   placeIn(L, mode);
 }
@@ -350,6 +363,23 @@ function onReady(L) {
   else { const ar = n.w / n.h, w = Math.min(o.w * (P ? 0.8 : 0.5), n.w, o.h * (P ? 0.8 : 0.7) * ar); L.w = w; L.h = w / ar; }
   rebase('studio'); queueSave(); // sizing is part of the "add" step, not a separate undo entry
   if (L.id === selId) renderProps();
+}
+
+// a phone turned between portrait and landscape: its picture changes shape -> keep the layer unstretched
+// (full screen stays full screen, "fit" stays fit, anything else keeps its centre and roughly its area)
+function phoneFit(V, n, r) {
+  const ar = n.w / n.h;
+  if (!r.ar) { r.ar = ar; return; }
+  if (Math.abs(ar - r.ar) / r.ar < 0.03) return;
+  r.ar = ar;
+  const L = byId(V.id); if (!L || L.fresh) return;
+  const P = parentOf(L.id), o = P ? { w: P.w, h: P.h } : out();
+  const cov = !L.rot && L.w >= o.w - 2 && L.h >= o.h - 2, fit = !L.rot && !cov && (Math.abs(L.w - o.w) < 2 || Math.abs(L.h - o.h) < 2);
+  if (cov) place(L, 'cover'); else if (fit) place(L, 'contain');
+  else { const A = L.w * L.h, k = cropAspect(L, n); L.w = Math.sqrt(A * k); L.h = L.w / k; }
+  dlog(`phone picture now ${n.w}x${n.h} -> layer ${Math.round(L.w)}x${Math.round(L.h)}`);
+  rebase('studio'); queueSave(); // not an undo step: the phone turned, the user didn't edit anything
+  if (L.id === selId) syncNums();
 }
 
 /* ------------------------------------------------------------------ sources */
@@ -488,7 +518,9 @@ function syncRuntime() {
   }
   for (const L of all) {
     let r = rt.get(L.id);
-    if (L.type === 'camera') {
+    if (L.type === 'camera' && L.phone) { // a phone (phonecam.js): its picture arrives over WebRTC, no device to open here
+      if (!r) { r = { el: phoneVideo(L.phone), ready: false, phone: L.phone }; rt.set(L.id, r); }
+    } else if (L.type === 'camera') {
       if (!r) { const c = camera(L.deviceId || '', syncRuntimeForce, L.name); r = { el: c.video, ready: false, cam: c }; rt.set(L.id, r); }
     } else if (L.type === 'image' && !r) {
       const img = new Image(); r = { el: img, ready: false }; rt.set(L.id, r);
@@ -499,9 +531,10 @@ function syncRuntime() {
       videoUrl(L.media).then((url) => { if (url && rt.get(L.id) === r) attachVideoSrc(L, url, !native); });
     } else if ((L.type === 'screen' || L.type === 'video') && !r) rt.set(L.id, { el: null, ready: false, keep: true });
   }
-  for (const sc of project.scenes) for (const l of allLayers(sc)) if (l.type === 'camera') needCams.add(l.deviceId || ''); // cameras stay open while any scene uses them
+  for (const sc of project.scenes) for (const l of allLayers(sc)) if (l.type === 'camera' && !l.phone) needCams.add(l.deviceId || ''); // cameras stay open while any scene uses them
   for (const [id, c] of [...cams]) if (!needCams.has(id)) { if (c.stream) c.stream.getTracks().forEach((t) => t.stop()); else c.promise.then(() => c.stream && c.stream.getTracks().forEach((t) => t.stop())); cams.delete(id); }
   syncRuntimeForce = false;
+  phoneNeed(phonesUsed());
   $('empty').classList.toggle('hidden', root().length > 0);
 }
 
@@ -516,7 +549,7 @@ async function listCameras() {
 async function addCamera() {
   let list = [];
   try { list = await listCameras(); } catch { /* no mediaDevices */ }
-  if (!list.length) { toast(T`ไม่พบกล้อง — ตรวจว่าเสียบกล้องแล้วและอนุญาตให้ใช้กล้อง`, { kind: 'err' }); return; }
+  if (!list.length) { toast(T`ไม่พบกล้อง — ตรวจว่าเสียบกล้องแล้วและอนุญาตให้ใช้กล้อง`, { kind: 'err', label: T`ใช้มือถือแทน`, action: openPhoneDialog }); return; }
   const pick = list.length === 1 ? list[0] : await htmlBox(
     `<h3>${T`เลือกกล้อง`}</h3><div class="pick-list">${list.map((d, i) => `<button class="pick" data-i="${i}">${icon('camera')}<span><b>${esc(d.label || T`กล้อง ${i + 1}`)}</b></span></button>`).join('')}</div><div class="modal-btns"><button class="pill-btn" data-x>${T`ยกเลิก`}</button></div>`,
     (m, close) => { m.querySelector('[data-x]').onclick = () => close(null); m.querySelectorAll('.pick').forEach((b) => { b.onclick = () => close(list[+b.dataset.i]); }); });
@@ -615,6 +648,46 @@ async function addSticker(extra = {}) {
 function addShape() {
   const o = out();
   addLayer(newLayer('shape', { fill: '#8ea2ff', fill2: '#ff9ec7', grad: true, w: o.w * 0.4, h: o.h * 0.4, radius: 28, fresh: false }));
+}
+// each lyrics style has its own natural box: the centre stays, the size changes (karaoke ↔ fade keep the box)
+function setLyStyle(L, k) {
+  const Y = L.ly, o = out(), was = Y.style; if (was === k) return;
+  Y.style = k;
+  const bottom = L.y + L.h / 2;
+  if (k === 'card') { L.h = Math.round(o.h * 0.13); L.w = Math.round(L.h * 310 / 82); }
+  else if (k === 'scroll') { L.h = Math.round(o.h * 0.36); L.w = Math.round(L.h * 1.75); }
+  else if (was === 'card' || was === 'scroll') { L.w = Math.round(o.w * 0.72); L.h = Math.round(o.h * (Y.next === false ? 0.126 : 0.19) * (Y.title !== false ? (Y.next === false ? 3.01 / 2.29 : 4.18 / 3.46) : 1)); }
+  L.y = Math.min(o.h - L.h / 2, bottom - L.h / 2); // keep it sitting on the same line
+}
+async function pickLrc() {
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.lrc,.txt';
+  const [f] = await pickFile(inp); if (f) await useLrcFile(f);
+}
+async function useLrcFile(f) {
+  const text = await f.text();
+  if (!looksLrc(text)) { toast(T`ไฟล์นี้ไม่มีเวลาของแต่ละบรรทัด (แบบ [00:12.34]) — ใช้ไฟล์ .lrc`, { kind: 'err' }); return; }
+  if (!music.key) { toast(T`เปิดเพลงก่อน แล้วค่อยใส่เนื้อเพลงของเพลงนั้น`, { kind: 'err' }); return; }
+  if (await lyricsOwn(text)) toast(T`ใช้เนื้อเพลงนี้กับ “${music.title}” แล้ว`);
+}
+async function pickFont(L) {
+  const inp = document.createElement('input'); inp.type = 'file'; inp.accept = '.ttf,.otf,.woff,.woff2';
+  const [f] = await pickFile(inp); if (!f) return;
+  if (!/\.(ttf|otf|woff2?)$/i.test(f.name)) { toast(T`ใช้ได้เฉพาะไฟล์ฟอนต์ .ttf .otf .woff .woff2`, { kind: 'err' }); return; }
+  if (f.size > 30 * 1024 * 1024) { toast(T`ไฟล์ฟอนต์ใหญ่เกินไป (เกิน 30 MB)`, { kind: 'err' }); return; }
+  const bytes = new Uint8Array(await f.arrayBuffer());
+  const r = await api.raw('font_put', bytes, { 'x-name': encodeURIComponent(f.name) });
+  const fam = await addFontFile(r && r.ok ? r.name : f.name, bytes.buffer.slice(0));
+  if (!fam) { toast(T`เปิดไฟล์ฟอนต์นี้ไม่ได้ ลองไฟล์อื่น`, { kind: 'err' }); return; }
+  if (!(r && r.ok)) toast(T`ใช้ฟอนต์ได้ แต่เก็บไว้ใช้ครั้งหน้าไม่สำเร็จ`, { kind: 'err' });
+  if (L && L.ly) { L.ly.font = fam; commitNow(); }
+  renderProps(); toast(T`เพิ่มฟอนต์ “${fam}” แล้ว`);
+}
+// what is playing on this PC + its lyrics, in time (lyrics.js); sits at the bottom like a subtitle
+function addLyrics() {
+  const o = out();
+  addLayer(newLayer('lyrics', { name: T`เนื้อเพลง`, x: o.w / 2, y: o.h * 0.81, w: o.w * 0.76, h: o.h * 0.23, fresh: false, ly: { ...LY_DEF } }));
+  musicNeed(true);
+  setTimeout(() => { if (music.ok && music.none) toast(T`เปิดเพลงใน Spotify หรือ YouTube แล้วเนื้อเพลงจะขึ้นเอง`, { label: T`ดูตัวอย่าง`, action: () => { music.demo = true; renderProps(); } }); }, 1600);
 }
 // an empty box that holds its own layers: keeps the main list tidy, and the whole box can be animated
 const AREA_DEF = { kids: [], clip: true, bg: false, fill: '#1c2140', radius: 18, fresh: false };
@@ -835,7 +908,7 @@ async function openFacePicker() {
   else if (pick.startsWith('paint:')) addFacePaint(pick.slice(6));
   else if (pick.startsWith('av:')) addAvatar(pick.slice(3));
 }
-const ADD = { face: openFacePicker, camera: addCamera, screen: addScreen, image: addImages, video: addVideo, text: () => addText(), sticker: () => addSticker(), shape: addShape, frame: addFrame, handfx: addHandFx, area: addArea };
+const ADD = { face: openFacePicker, camera: addCamera, phone: openPhoneDialog, screen: addScreen, image: addImages, video: addVideo, text: () => addText(), sticker: () => addSticker(), shape: addShape, frame: addFrame, handfx: addHandFx, area: addArea, lyrics: addLyrics };
 
 /* ------------------------------------------------------------ hand tracking */
 // which layer the tracker watches: the chosen one, else the first camera (then video / screen / image) in this scene
@@ -876,7 +949,7 @@ function trackAi(now) {
   // hands and face each get their own picture and worker (ai.js): the hands never wait for the face model
   if (hOk) feedAi('hand', r.el, now, { hand: true }, { maxW: 640, gap: handGap() });
   if (fOk) feedAi('face', r.el, now, { face: true }, { maxW: 640, gap: handGap() });
-  const c = S.crop, cw = 1 - c.l - c.r, ch = 1 - c.t - c.b, a = S.rot * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a), fh = S.flipH ? -1 : 1, fv = S.flipV ? -1 : 1;
+  const c = effCrop(S), cw = 1 - c.l - c.r, ch = 1 - c.t - c.b, a = S.rot * Math.PI / 180, ca = Math.cos(a), sa = Math.sin(a), fh = S.flipH ? -1 : 1, fv = S.flipV ? -1 : 1;
   const map = (x, y) => { const u = ((x - c.l) / cw - 0.5) * S.w * fh, v = ((y - c.t) / ch - 0.5) * S.h * fv; return [S.x + u * ca - v * sa, S.y + u * sa + v * ca]; };
   if (wantF) {
     const o = out();
@@ -1073,7 +1146,7 @@ function drawOverlay() {
   if (!H.on) return;
   const S = handSource();
   if (hands.zone && S) { // the part of the camera picture that maps onto the whole screen in mouse mode
-    const z = hands.zone, c = S.crop, cw = 1 - c.l - c.r, ch = 1 - c.t - c.b, a = S.rot * Math.PI / 180, fh = S.flipH ? -1 : 1, fv = S.flipV ? -1 : 1;
+    const z = hands.zone, c = effCrop(S), cw = 1 - c.l - c.r, ch = 1 - c.t - c.b, a = S.rot * Math.PI / 180, fh = S.flipH ? -1 : 1, fv = S.flipV ? -1 : 1;
     octx.save(); octx.translate(S.x, S.y); octx.rotate(a);
     const x0 = ((z[0] - c.l) / cw - 0.5) * S.w * fh, x1 = ((z[2] - c.l) / cw - 0.5) * S.w * fh, y0 = ((z[1] - c.t) / ch - 0.5) * S.h * fv, y1 = ((z[3] - c.t) / ch - 0.5) * S.h * fv;
     octx.setLineDash([14, 10]); octx.lineWidth = 3; octx.strokeStyle = 'rgba(255,255,255,.9)'; octx.strokeRect(Math.min(x0, x1), Math.min(y0, y1), Math.abs(x1 - x0), Math.abs(y1 - y0));
@@ -1205,6 +1278,9 @@ function drawLayerAt(L, now, hs) {
     if (L.shadow) setShadow(L);
     if (L.grad) { const g = ctx.createLinearGradient(-L.w / 2, -L.h / 2, L.w / 2, L.h / 2); g.addColorStop(0, L.fill); g.addColorStop(1, L.fill2); ctx.fillStyle = g; } else ctx.fillStyle = L.fill;
     shapePath(L, L.w, L.h); ctx.fill(); noShadow();
+  } else if (L.type === 'lyrics') {
+    // always full quality, also in light mode: one small WebGL pass (light mode once hid the new glass from the user — pitfalls)
+    drawLyrics(ctx, L, now, { canvas, rs, lite: false, selected: selSet.has(L.id) && !document.hidden });
   } else if (L.type === 'avatar') {
     const A = L.av || (L.av = { ...AV_DEF, parts: {} });
     drawAvatar(ctx, L, sceneFaces[+A.who || 0] || null, now, assetImg);
@@ -1218,9 +1294,16 @@ function drawLayerAt(L, now, hs) {
       shapePath(L, L.w, L.h); ctx.fillStyle = 'rgba(124,140,255,.22)'; ctx.fill(); ctx.strokeStyle = 'rgba(255,255,255,.5)'; ctx.lineWidth = 2; ctx.setLineDash([10, 8]); ctx.stroke(); ctx.setLineDash([]);
       ctx.fillStyle = '#fff'; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.font = `600 ${Math.max(13, Math.min(26, L.w / 16))}px "IBM Plex Sans Thai", sans-serif`;
       const failed = r && r.cam && r.cam.failed;
+      if (r && r.phone) { // two short lines read better than one squeezed line
+        const [a, b] = phoneStatus(r.phone).split(' — ');
+        if (b) { ctx.fillText(a, 0, -16, L.w - 20); ctx.font = `500 ${Math.max(11, Math.min(18, L.w / 24))}px "IBM Plex Sans Thai", sans-serif`; ctx.fillText(b, 0, 16, L.w - 20); }
+        else ctx.fillText(a, 0, 0, L.w - 20);
+      } else {
       if (failed && r.cam.err) { ctx.font = '12px sans-serif'; ctx.fillText(r.cam.err, 0, 28, L.w - 20); ctx.font = `600 ${Math.max(13, Math.min(26, L.w / 16))}px "IBM Plex Sans Thai", sans-serif`; }
       ctx.fillText(failed ? (r.cam.held ? T`ครั้งก่อนกล้องค้าง — ดับเบิลคลิกเพื่อลองเปิดใหม่` : T`เปิดกล้องไม่ได้ (ดับเบิลคลิกเพื่อลองใหม่)`) : L.type === 'screen' ? T`ดับเบิลคลิกเพื่อเลือกหน้าจออีกครั้ง` : L.type === 'video' ? T`ดับเบิลคลิกเพื่อเลือกไฟล์วิดีโออีกครั้ง` : T`กำลังเปิด…`, 0, 0, L.w - 20);
+      }
     } else {
+      if (r.phone) phoneFit(L, n, r);
       let src = r.el;
       const fx = L.key.on || L.ai.mode !== 'off';
       if (fx) {
@@ -1239,7 +1322,7 @@ function drawLayerAt(L, now, hs) {
         }
       } else if (r.proc) { r.proc.dispose(); r.proc = null; r.mask = null; }
       const sw = src.videoWidth || src.naturalWidth || src.width, sh = src.videoHeight || src.naturalHeight || src.height;
-      const c = L.crop, sx = c.l * sw, sy = c.t * sh, sW = Math.max(1, (1 - c.l - c.r) * sw), sH = Math.max(1, (1 - c.t - c.b) * sh);
+      const c = effCrop(L), sx = c.l * sw, sy = c.t * sh, sW = Math.max(1, (1 - c.l - c.r) * sw), sH = Math.max(1, (1 - c.t - c.b) * sh);
       const shaped = L.radius > 0 || L.mask === 'ellipse';
       const transparent = fx && (L.key.on || L.ai.mode === 'remove');
       if (L.shadow && shaped && !transparent) { setShadow(L); ctx.fillStyle = '#000'; shapePath(L, L.w, L.h, 1); ctx.fill(); noShadow(); }
@@ -1251,7 +1334,7 @@ function drawLayerAt(L, now, hs) {
       ctx.restore();
     }
   }
-  if (L.border > 0 && L.type !== 'text' ) { noShadow(); ctx.filter = 'none'; shapePath(L, L.w, L.h, L.border / 2); ctx.lineWidth = L.border; ctx.strokeStyle = L.borderColor; ctx.stroke(); }
+  if (L.border > 0 && L.type !== 'text' && L.type !== 'lyrics') { noShadow(); ctx.filter = 'none'; shapePath(L, L.w, L.h, L.border / 2); ctx.lineWidth = L.border; ctx.strokeStyle = L.borderColor; ctx.stroke(); }
   ctx.restore();
 }
 
@@ -1289,6 +1372,7 @@ function draw() {
   ctx.setTransform(rs, 0, 0, rs, 0, 0); ctx.globalAlpha = 1; ctx.filter = 'none'; ctx.globalCompositeOperation = 'source-over';
   ctx.fillStyle = '#05060f'; ctx.fillRect(0, 0, o.w, o.h);
   frameNo++;
+  if (frameNo % 20 === 1) { const ly = allLayers().find((l) => l.type === 'lyrics' && l.vis); musicNeed(!!ly, ly && ly.ly ? ly.ly.app || '' : ''); }
   const now = performance.now();
   try { trackAi(now); } catch (err) { console.error('tracking', err); }
   bus.emit('hand:tick', now);
@@ -1657,6 +1741,7 @@ box.addEventListener('dblclick', async (e) => {
   if (!L) { if (scope) exitArea(); return; }
   const r = rt.get(L.id);
   if (L.type === 'area') enterArea(L);
+  else if (L.type === 'camera' && L.phone && !natural(L)) openPhoneDialog();
   else if (L.type === 'camera' && r && r.cam && r.cam.failed) retryCamera(L);
   else if (L.type === 'screen' && !(r && r.el)) await attachScreen(L);
   else if (L.type === 'video' && !(r && r.el)) { const [f] = await pickFile($('file-video')); if (f) { setVideoFile(L, f); commit(); } }
@@ -1865,6 +1950,8 @@ addEventListener('drop', async (e) => {
   for (const f of e.dataTransfer.files) {
     const before = layers().length;
     if (f.type.startsWith('image/')) await addImageFile(f);
+    else if (/\.lrc$/i.test(f.name)) { await useLrcFile(f); continue; }
+    else if (/\.(ttf|otf|woff2?)$/i.test(f.name)) { const L = sel(); await (async () => { const bytes = new Uint8Array(await f.arrayBuffer()); const r = await api.raw('font_put', bytes, { 'x-name': encodeURIComponent(f.name) }); const fam = await addFontFile(r && r.ok ? r.name : f.name, bytes.buffer.slice(0)); if (fam) { if (L && L.type === 'lyrics') { L.ly.font = fam; commitNow(); } else if (L && L.type === 'text') { L.font = fam; commitNow(); } toast(T`เพิ่มฟอนต์ “${fam}” แล้ว`); renderProps(); } else toast(T`เปิดไฟล์ฟอนต์นี้ไม่ได้ ลองไฟล์อื่น`, { kind: 'err' }); })(); continue; }
     else if (f.type.startsWith('video/')) { const L = newLayer('video', { name: f.name.replace(/\.[^.]+$/, '').slice(0, 40) }); setVideoFile(L, f); addLayer(L); }
     const L = layers().length > before ? layers()[layers().length - 1] : null;
     if (L && p) { L.x = p.x + i * 24; L.y = p.y + i * 24; i++; }
@@ -2307,7 +2394,7 @@ function renderLayers() {
   }
   el.innerHTML = head + a.slice().reverse().map((L) => `
     <div class="layer${L.id === selId ? ' sel' : selSet.has(L.id) ? ' sel2' : ''}${L.vis ? '' : ' off'}${L.type === 'area' ? ' is-area' : ''}" data-id="${L.id}" data-lid="${L.id}">
-      <span class="l-ico">${icon(TYPE_ICON[L.type])}</span>
+      <span class="l-ico">${icon(L.phone ? 'phone' : TYPE_ICON[L.type])}</span>
       <span class="l-name">${esc(L.name)}<small>${esc(typeLabel(L.type))}${L.type === 'area' ? ' · ' + T`${allOf(L.kids).length} ชิ้น` : ''}</small></span>
       ${L.type === 'area' ? `<button class="icon-btn" data-act="enter" title="${T`เข้าไปแก้ไขข้างใน`}">${icon('chev')}</button>` : ''}
       <button class="icon-btn${L.lock ? ' on' : ''}" data-act="lock" title="${T`ล็อกตำแหน่ง`}">${icon(L.lock ? 'lock' : 'unlock')}</button>
@@ -2357,7 +2444,7 @@ function showPeek(L, row) {
     const anims = [];
     for (const c of scene().clips || []) { const ts = c.tracks.filter((t) => t.layer === L.id); if (ts.length) anims.push(`<span>${icon('anim')}<b>${esc(c.name)}</b><em>${(+c.dur).toFixed(1)}s · ${esc([...new Set(ts.map((t) => (APROPS[t.prop] || { label: t.prop }).label))].slice(0, 5).join(', '))}</em></span>`); }
     const kids = L.type === 'area' ? allOf(L.kids) : [];
-    peek.innerHTML = `<canvas></canvas><div class="pk-t">${icon(TYPE_ICON[L.type])}<b>${esc(L.name)}</b></div><small>${esc(info.join(' · '))}</small>`
+    peek.innerHTML = `<canvas></canvas><div class="pk-t">${icon(L.phone ? 'phone' : TYPE_ICON[L.type])}<b>${esc(L.name)}</b></div><small>${esc(info.join(' · '))}</small>`
       + (L.type === 'area' ? `<div class="pk-kids">${kids.length ? kids.slice(0, 8).map((k) => `<span>${icon(TYPE_ICON[k.type])}${esc(k.name)}</span>`).join('') + (kids.length > 8 ? `<span>+${kids.length - 8}</span>` : '') : `<span>${T`ยังว่างอยู่`}</span>`}</div>` : '')
       + `<div class="pk-anim">${anims.length ? anims.join('') : `<span class="none">${T`ยังไม่มีแอนิเมชัน`}</span>`}</div>`;
     peek.classList.remove('hidden');
@@ -2371,7 +2458,7 @@ function drawPeek() {
   const L = peekL, cv = peek.querySelector('canvas'); if (!L || !cv) return;
   const r = rt.get(L.id), n = natural(L), o = out();
   let img = null, sx = 0, sy = 0, sw = 0, sh = 0;
-  if (n && r && r.el) { const c = L.crop; img = r.el; sx = c.l * n.w; sy = c.t * n.h; sw = n.w * (1 - c.l - c.r); sh = n.h * (1 - c.t - c.b); }
+  if (n && r && r.el) { const c = effCrop(L); img = r.el; sx = c.l * n.w; sy = c.t * n.h; sw = n.w * (1 - c.l - c.r); sh = n.h * (1 - c.t - c.b); }
   else if (!FULLFX.has(L.type)) { // the part of the stage picture where the layer is
     const b = groupBox([L]), x0 = clamp(b.x0, 0, o.w), y0 = clamp(b.y0, 0, o.h), x1 = clamp(b.x1, 0, o.w), y1 = clamp(b.y1, 0, o.h);
     if (x1 - x0 > 2 && y1 - y0 > 2) { img = canvas; sx = x0; sy = y0; sw = x1 - x0; sh = y1 - y0; }
@@ -2396,13 +2483,14 @@ const PRESETS = [
   [T`ดราม่า`, { br: 92, ct: 142, sa: 118, hue: 0, blur: 0, gray: 0, sepia: 0 }],
   [T`นุ่มฝัน`, { br: 110, ct: 90, sa: 112, hue: 0, blur: 2, gray: 0, sepia: 8 }],
 ];
-const FONTS = ['IBM Plex Sans Thai', 'Prompt', 'Kanit', 'Anuphan', 'Noto Sans Thai', 'Segoe UI', 'Segoe UI Emoji'];
+const FONTS = ['IBM Plex Sans Thai', 'Prompt', 'Kanit', 'Anuphan', 'Noto Sans Thai', 'Bai Jamjuree', 'Segoe UI', 'Segoe UI Emoji'];
+const allFonts = () => [...FONTS, ...userFonts.map((f) => f.family).filter((f) => !FONTS.includes(f))];
 const BLENDS = [['source-over', T`ปกติ`], ['screen', 'Screen'], ['multiply', 'Multiply'], ['overlay', 'Overlay'], ['lighter', 'Add'], ['soft-light', 'Soft light']];
 let numSync = [];
 function syncNums() { for (const f of numSync) f(); }
 
 // with several layers selected, a change made in the panel is copied to all of them (only the fields each one has)
-const NOSPREAD = new Set(['id', 'name', 'text', 'x', 'y', 'w', 'h', 'crop', 'fresh', 'asset', 'media', 'deviceId', 'type', 'kids', 'lock', 'vis']);
+const NOSPREAD = new Set(['id', 'name', 'text', 'x', 'y', 'w', 'h', 'crop', 'fresh', 'asset', 'media', 'deviceId', 'phone', 'type', 'kids', 'lock', 'vis']);
 function spread(before, L, peers) {
   const walk = (a, b, path) => {
     for (const k of Object.keys(a)) {
@@ -2475,6 +2563,19 @@ function renderProps() {
   const whoOpts = () => [['0', T`หน้าแรก (เห็นนานที่สุด)`], ['1', T`หน้าที่ 2`], ['2', T`หน้าที่ 3`], ['3', T`หน้าที่ 4`]];
   const faceCfgSec = (parent) => { chips(parent, [[T`ตั้งค่าการจับใบหน้า…`, () => showTab('hand'), false, 'sliders', T`GPU / CPU · ความนิ่ง · ความไวสีหน้า · ปรับให้เข้ากับหน้าคุณ (แท็บติดตาม)`]]).style.marginTop = '6px'; };
 
+  /* — phone camera (phonecam.js builds and refreshes it) — */
+  if (L.type === 'camera' && L.phone) phonePanel(sec('phone', T`มือถือ` + ' · ' + phoneName(L.phone)), L, openPhoneDialog);
+  /* — digital zoom: any camera (phones whose browser can't zoom the lens use this) — */
+  if (L.type === 'camera') {
+    if (!L.dz) { L.dz = { z: 1, x: 0, y: 0 }; rebase('studio'); } // a default, not an edit
+    const dz = sec('zoomIn', T`ซูมดิจิทัล (ในคอม)`);
+    slider(dz, T`ซูม`, L.dz, 'z', 1, 4, 0.05, (v) => (+v).toFixed(2) + '×');
+    slider(dz, T`เลื่อนซ้าย-ขวา`, L.dz, 'x', -1, 1, 0.02, (v) => Math.round(v * 100));
+    slider(dz, T`เลื่อนขึ้น-ลง`, L.dz, 'y', -1, 1, 0.02, (v) => Math.round(v * 100));
+    if (L.dz.z > 1 || L.dz.x || L.dz.y) chips(dz, [[T`ไม่ซูม`, () => { L.dz = { z: 1, x: 0, y: 0 }; }, false, 'refresh']]).style.marginTop = '6px';
+    note(dz, T`ขยายภาพในคอม ไม่ใช่เลนส์กล้อง — ยิ่งซูมยิ่งเห็นเม็ด (ถ้ามือถือซูมเลนส์ได้ ใช้ซูมของมือถือด้านบนจะคมกว่า)`);
+  }
+
   /* — face paint layer — */
   if (L.type === 'facepaint') {
     const s1 = sec('face', T`ลายบนหน้า`);
@@ -2540,14 +2641,75 @@ function renderProps() {
     return;
   }
 
+  /* — lyrics — */
+  if (L.type === 'lyrics') {
+    const Y = L.ly || (L.ly = { ...LY_DEF });
+    const s1 = sec('music', T`เนื้อเพลง`);
+    const stn = note(s1, musicStatus()); stn.dataset.lyst = '1';
+    chips(s1, [['karaoke', T`คาราโอเกะไล่สี`], ['fade', T`คำค่อย ๆ ชัด`], ['scroll', T`เลื่อนทีละบรรทัด`], ['card', T`การ์ดเล็ก`]].map(([k, n]) => [n, () => setLyStyle(L, k), Y.style === k])).style.margin = '6px 0';
+    const ly = music.ly || {};
+    chips(s1, [
+      music.key && [T`หาเนื้อเพลงใหม่`, () => lyricsReload(), false, 'refresh', T`ค้นหาจาก LRCLIB อีกครั้ง`],
+      music.key && [T`ใส่เนื้อเพลงเอง (.lrc)`, () => pickLrc(), false, 'file', T`ไฟล์ .lrc ที่มีเวลาของแต่ละบรรทัด — หรือลากไฟล์มาวางบนเวที`],
+      music.key && ly.source === 'file' && [T`เลิกใช้เนื้อเพลงของฉัน`, () => lyricsOwn(''), false, 'x'],
+      music.none && [music.demo ? T`ปิดเพลงตัวอย่าง` : T`ดูเพลงตัวอย่าง`, () => { music.demo = !music.demo; }, music.demo, 'play', T`ลองหน้าตาโดยไม่ต้องเปิดเพลง`],
+    ].filter(Boolean));
+    if (music.apps.length > 1 || Y.app) pick(s1, T`ฟังเพลงจาก`, Y, 'app', [['', T`อัตโนมัติ (ที่กำลังเล่น)`], ...music.apps.filter((a, i, arr) => arr.findIndex((b) => b.name === a.name) === i).map((a) => [a.id.toLowerCase(), a.name + (a.playing ? ' ▶' : '')])]);
+    note(s1, T`อ่านชื่อเพลงจาก Windows (Spotify, YouTube ในเบราว์เซอร์ ฯลฯ) — ส่งแค่ชื่อเพลงและศิลปินไปหาเนื้อเพลงที่ LRCLIB แล้วเก็บไว้ในเครื่อง`);
+
+    const s2 = sec('sparkle', T`หน้าตา`);
+    chips(s2, [['glass', T`แก้ว Prism ใส`], ['dark', T`แก้ว Prism เข้ม`], ['none', T`ไม่มีพื้น`]].map(([k, n]) => [n, () => { Y.bg = k; }, Y.bg === k]));
+    if (Y.bg !== 'none') slider(s2, T`ความฝ้า`, Y, 'frost', 0, 100, 1, (v) => v + '%').title = T`น้อย = ใสเห็นข้างหลังชัด · มาก = ฝ้าขุ่น อ่านง่าย`;
+    chips(s2, [
+      (Y.style === 'karaoke' || Y.style === 'fade') && [T`แสดงบรรทัดถัดไป`, () => { Y.next = Y.next === false; L.h = Math.round(L.h * (Y.next ? 3.46 / 2.29 : 2.29 / 3.46)); }, Y.next !== false],
+      [T`แผ่นเสียงหมุน`, () => { const on = Y.disc === false || Y.art === false; Y.disc = on; Y.art = true; }, Y.disc !== false && Y.art !== false, 'music', T`แผ่นเสียงที่มีปกเพลงตรงกลาง หมุนตอนเพลงเล่น — สีในแก้วซึมออกมาจากแผ่นนี้`],
+      Y.style !== 'card' && [T`ชื่อเพลง`, () => {
+        Y.title = Y.title === false;
+        if (Y.style !== 'scroll') { const b = Y.next !== false ? 3.46 : 2.29; L.h = Math.round(L.h * (Y.title ? (b + 0.72) / b : b / (b + 0.72))); } // the words keep their size
+      }, Y.title !== false, null, T`“♪ ชื่อเพลง · ศิลปิน” ตัวเล็กเหนือเนื้อร้อง`],
+      Y.style === 'card' && [T`ไล่สีคาราโอเกะ`, () => { Y.cardFill = !Y.cardFill; }, !!Y.cardFill],
+      [T`สีอัตโนมัติ`, () => { Y.color = Y.color ? '' : (Y.bg === 'glass' ? '#2a2352' : '#ffffff'); }, !Y.color, null, T`เข้ม/ขาวตามพื้นหลัง`],
+    ].filter(Boolean)).style.marginTop = '6px';
+    if (Y.color) color(s2, T`สีตัวอักษร`, Y, 'color');
+
+    // colour that seeps through the glass from the record, like ink in water, further when the music is louder
+    const s5 = sec('drop', T`สีในแก้ว`);
+    if (Y.bg === 'none') note(s5, T`เลือก “แก้ว Prism ใส” หรือ “เข้ม” ก่อน — สีจะซึมอยู่ในแก้ว`);
+    else {
+      Y.ink ||= 'cover';
+      chips(s5, [['cover', T`สีจากปกเพลง`], ['custom', T`เลือกสีเอง`], ['off', T`ไม่มีสี`]].map(([k, n]) => [n, () => { Y.ink = k; }, Y.ink === k]));
+      if (Y.ink === 'custom') { Y.c1 ||= LY_DEF.c1; Y.c2 ||= LY_DEF.c2; color(s5, T`สีเข้ม (ตรงแผ่นเสียง)`, Y, 'c1'); color(s5, T`สีอ่อน (ปลายทาง)`, Y, 'c2'); }
+      if (Y.ink !== 'off') {
+        Y.inkA ??= LY_DEF.inkA; Y.react ??= LY_DEF.react;
+        slider(s5, T`ความเข้มสี`, Y, 'inkA', 0, 100, 1, (v) => v + '%');
+        slider(s5, T`แผ่ตามความดัง`, Y, 'react', 0, 100, 1, (v) => (v ? v + '%' : T`นิ่ง`));
+        chips(s5, [[T`ระลอกน้ำตอนจังหวะหนัก`, () => { Y.ripple = Y.ripple === false; }, Y.ripple !== false, null, T`ตอนกลองหรือเบสหนัก มีระลอกวงกลมนุ่ม ๆ แผ่ออกจากแผ่นเสียงในแก้ว`]]).style.marginTop = '6px';
+        note(s5, music.whole ? T`วัดความดังจากเสียงทั้งเครื่อง (หาโปรแกรมเล่นเพลงไม่เจอ)` : T`เฉดสีคำนวณครั้งเดียวตอนเปลี่ยนเพลง สีซึมออกจากแผ่นเสียงช้า ๆ เหมือนหมึกในน้ำ — ความดังวัดจากโปรแกรมเล่นเพลงอย่างเดียว เสียงพูดใน Discord ไม่มีผล`);
+      }
+    }
+
+    const s3 = sec('text', T`ตัวอักษร`);
+    const fonts = [...LY_FONTS, ...userFonts.map((f) => f.family)];
+    const fc = chips(s3, fonts.map((f) => [f, () => { Y.font = f; }, Y.font === f]));
+    fc.querySelectorAll('.chip span').forEach((sp, i) => { sp.style.fontFamily = `"${fonts[i]}", "IBM Plex Sans Thai"`; });
+    chips(s3, [[T`เพิ่มฟอนต์ของฉัน…`, () => pickFont(L), false, 'plus', '.ttf .otf .woff .woff2'],
+      userFonts.some((f) => f.family === Y.font) && [T`ลบฟอนต์นี้`, () => { removeFontFile(Y.font).then(() => { Y.font = LY_DEF.font; commit(); renderProps(); }); }, false, 'trash']].filter(Boolean)).style.marginTop = '6px';
+    slider(s3, T`ความหนา`, Y, 'weight', 300, 800, 100, (v) => ({ 300: T`บาง`, 400: T`ปกติบาง`, 500: T`ปกติ`, 600: T`หนา`, 700: T`หนามาก`, 800: T`หนาสุด` }[v] || v));
+
+    const s4 = sec('clock', T`จังหวะ`);
+    slider(s4, T`เลื่อนเนื้อเพลง`, Y, 'offset', -3000, 3000, 50, (v) => (v > 0 ? T`ช้าลง ${(v / 1000).toFixed(2)} วิ` : v < 0 ? T`เร็วขึ้น ${(-v / 1000).toFixed(2)} วิ` : '0.00'));
+    if (Y.offset) chips(s4, [[T`รีเซ็ต`, () => { Y.offset = 0; }, false, 'refresh']]).style.marginTop = '6px';
+    note(s4, T`เนื้อเพลงขึ้นก่อนเสียงร้อง = เลื่อนไปทาง “ช้าลง” · ขึ้นหลังเสียงร้อง = “เร็วขึ้น”`);
+  }
+
   /* — text — */
   if (L.type === 'text') {
     const s = sec('text', T`ข้อความ`);
     const f = document.createElement('label'); f.className = 'field area'; f.innerHTML = '<textarea spellcheck="false"></textarea>'; s.appendChild(f);
     const ta = f.querySelector('textarea'); ta.value = L.text; ta.oninput = () => { L.text = ta.value; }; ta.onchange = () => { L.name = (L.text.split('\n')[0] || T`ข้อความ`).slice(0, 24); commit(); renderLayers(); };
-    const fr = row(s, T`ฟอนต์`, `<label class="field"><select>${FONTS.map((x) => `<option>${x}</option>`).join('')}</select></label>`);
+    const fr = row(s, T`ฟอนต์`, `<label class="field"><select>${allFonts().map((x) => `<option>${esc(x)}</option>`).join('')}</select></label>`);
     const fs = fr.querySelector('select'); fs.value = L.font; fs.onchange = () => { L.font = fs.value; commit(); };
-    slider(s, T`ความหนา`, L, 'weight', 400, 700, 100);
+    slider(s, T`ความหนา`, L, 'weight', 300, 800, 100);
     color(s, T`สีตัวอักษร`, L, 'color');
     slider(s, T`ขอบตัวอักษร`, L, 'stroke', 0, 12, 1);
     if (L.stroke) color(s, T`สีขอบ`, L, 'strokeColor');
@@ -2624,7 +2786,7 @@ function renderProps() {
   for (const [k, lab] of [['x', 'X'], ['y', 'Y'], ['w', 'W'], ['h', 'H']]) {
     const f = document.createElement('label'); f.className = 'field'; f.innerHTML = `<b>${lab}</b><input type="number">`; nums.appendChild(f);
     const inp = f.querySelector('input'); const show = () => { if (document.activeElement !== inp && !inp._scrub) inp.value = Math.round(L[k]); };
-    const apply = () => { const v = +inp.value; if (!Number.isFinite(v)) return false; if ((k === 'w' || k === 'h') && L.type !== 'frame' && L.type !== 'shape') { const ar = L.w / L.h; if (k === 'w') { L.w = Math.max(8, v); L.h = L.w / ar; } else { L.h = Math.max(8, v); L.w = L.h * ar; } } else L[k] = (k === 'w' || k === 'h') ? Math.max(8, v) : v; return true; };
+    const apply = () => { const v = +inp.value; if (!Number.isFinite(v)) return false; if ((k === 'w' || k === 'h') && L.type !== 'frame' && L.type !== 'shape' && L.type !== 'lyrics') { const ar = L.w / L.h; if (k === 'w') { L.w = Math.max(8, v); L.h = L.w / ar; } else { L.h = Math.max(8, v); L.w = L.h * ar; } } else L[k] = (k === 'w' || k === 'h') ? Math.max(8, v) : v; return true; };
     inp.oninput = () => { if (inp._scrub) apply(); }; // dragging the number: live, one undo step at the end
     inp.onchange = () => { if (apply()) { commit(); syncNums(); } };
     show(); numSync.push(show);
@@ -2694,7 +2856,8 @@ function renderProps() {
   }
 
   /* — shape of the box — */
-  if (L.type !== 'text') {
+  if (L.type === 'lyrics') { /* the glass is the shape */ }
+  else if (L.type !== 'text') {
     const sh = sec('frame', T`รูปร่างและกรอบ`);
     chips(sh, [[T`สี่เหลี่ยม`, () => { L.mask = 'rect'; }, L.mask === 'rect'], [T`วงรี / วงกลม`, () => { L.mask = 'ellipse'; }, L.mask === 'ellipse'],
       media && [cropMode ? T`เสร็จสิ้นการครอป` : T`ครอปภาพ`, () => { cropMode = !cropMode; }, cropMode, 'crop'],
@@ -2809,6 +2972,7 @@ async function toggleRecord() {
 export async function startStudio() {
   await load();
   ensureHand();
+  initPhones({ project: () => project, used: phonesUsed, saveSoon: queueSave, addLayer: (pid, name) => { const n = allLayers().filter((l) => l.phone).length, L = newLayer('camera', { phone: pid, deviceId: '', name }); if (n) { L.x += 48 * n; L.y += 36 * n; } addLayer(L); } }); // a second phone must not land exactly on the first
   for (const sc of project.scenes) for (const l of allLayers(sc)) {
     if (l.type === 'image' && l.asset && project.assets[l.asset] && !lib().some((x) => x.asset === l.asset)) lib().push({ id: uid(), kind: 'image', asset: l.asset, name: l.name, at: Date.now() });
     if (l.type === 'video' && l.media && !lib().some((x) => x.media === l.media)) lib().push({ id: uid(), kind: 'video', media: l.media, name: l.name, at: Date.now() });
@@ -2827,6 +2991,13 @@ export async function startStudio() {
   addEventListener('resize', layout);
   new ResizeObserver(layout).observe($('scene-area'));
   bus.on('select-tab', showTab);
+  // the song changed / lyrics arrived: refresh the lyrics panel (not while a slider or field in it is being used)
+  bus.on('music', () => {
+    const L = sel(); if (!L || L.type !== 'lyrics') return;
+    const a = document.activeElement, busy = a && a.closest && a.closest('#tab-props') && /INPUT|SELECT|TEXTAREA/.test(a.tagName);
+    if (busy) { const n = document.querySelector('[data-lyst]'); if (n) n.textContent = musicStatus(); } else renderProps();
+  });
+  loadUserFonts().then(() => { if (userFonts.length) renderProps(); });
   // commands fired by hand gestures (and anything else that wants to drive the studio)
   const gotoScene = (i) => { if (i < 0 || i >= project.scenes.length || i === project.cur) return; project.cur = i; selId = null; commit(); syncRuntime(); refreshAll(); };
   bus.on('cmd', (c) => {
@@ -2871,6 +3042,7 @@ function reset() { project = fresh(); ensureHand(); selId = null; scope = null; 
 export function releaseAll() {
   for (const c of cams.values()) { if (c.stream) c.stream.getTracks().forEach((t) => t.stop()); if (c.video) c.video.srcObject = null; }
   for (const r of rt.values()) if (r.own && r.el && r.el.srcObject) r.el.srcObject.getTracks().forEach((t) => t.stop());
+  closePhones(); // the phone pages keep retrying and reconnect by themselves when Prism Cam is back
   guard(false);
 }
 addEventListener('pagehide', releaseAll);
@@ -2879,8 +3051,8 @@ export const studio = {
   rebaseNow: () => { rebase(); undoBtn(); queueSave(); },
   sourceOf: (L) => { const r = rt.get(L.id); return r && r.el && natural(L) ? r.el : null; },
   hand: () => project.hand, applyHandCfg, touch, handSource, saveTemplate, slideGo, setVis, solo, arrange, dragLayers, layerMenu, copyLayers, pasteLayers, overStage, hasLayerClip: () => !!layerClip, allLayers, tree, enterArea, exitArea, scope: () => scope, parentOf, scenes: () => project.scenes,
-  addHandFx, addHandText, addHandSticker, refreshProps: renderProps, showTab, wearBind: (id) => { const L = byId(id); if (L) wearBind(L); }, addImageFile, openFacePicker,
+  addLyrics, music, fakeSong, addFontFile, removeFontFile, setLyStyle: (L, k) => { setLyStyle(L, k); commit(); refreshAll(); }, addHandFx, addHandText, addHandSticker, refreshProps: renderProps, showTab, wearBind: (id) => { const L = byId(id); if (L) wearBind(L); }, addImageFile, openFacePicker,
   addFace: (k) => (k.startsWith('pack:') ? addFaceSticker(k.slice(5)) : k.startsWith('paint:') ? addFacePaint(k.slice(6)) : k.startsWith('av:') ? addAvatar(k.slice(3)) : null),
   faces: () => sceneFaces, faceInfo: () => face, faceCfg: () => project.face, applyFaceCfg, faceInUse: () => faceUse, setFacePreview, faceStatusLong, placeSel: (m) => { const L = sel(); if (L) { place(L, m); commit(); } },
-  scene, byId, select, selectMany, selected: () => sel(), selection: () => sels(), renameLayer, renameScene, commit, E, AV, hands: HS, typeLabel, TYPE_ICON, renderLayers, refreshAll, layout,
+  scene, byId, removeLayer, select, selectMany, selected: () => sel(), selection: () => sels(), renameLayer, renameScene, commit, E, AV, hands: HS, typeLabel, TYPE_ICON, renderLayers, refreshAll, layout,
 };
